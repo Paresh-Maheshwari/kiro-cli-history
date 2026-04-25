@@ -1,7 +1,6 @@
 # kiro-cli-history
 
 [![CI](https://github.com/Paresh-Maheshwari/kiro-cli-history/actions/workflows/ci.yml/badge.svg)](https://github.com/Paresh-Maheshwari/kiro-cli-history/actions/workflows/ci.yml)
-[![Release](https://github.com/Paresh-Maheshwari/kiro-cli-history/actions/workflows/release.yml/badge.svg)](https://github.com/Paresh-Maheshwari/kiro-cli-history/actions/workflows/release.yml)
 [![Latest Release](https://img.shields.io/github/v/release/Paresh-Maheshwari/kiro-cli-history?label=latest)](https://github.com/Paresh-Maheshwari/kiro-cli-history/releases/latest)
 [![Go](https://img.shields.io/badge/Go-1.21+-00ADD8?logo=go&logoColor=white)](https://go.dev)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
