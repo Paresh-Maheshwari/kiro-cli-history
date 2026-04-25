@@ -1,0 +1,23 @@
+# Binaries
+kiro-cli-history
+*.exe
+
+# Go
+vendor/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Test
+cmd_*_test.go
+
+# Demo data
+demo/
