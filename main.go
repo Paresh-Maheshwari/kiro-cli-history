@@ -78,7 +78,7 @@ Config: ~/.config/kiro-cli-history/config.json
 		fmt.Fprintf(os.Stderr, "kiro-cli not found in PATH\n")
 		os.Exit(1)
 	}
-	if err := syscall.Exec(bin, []string{"kiro-cli", "chat", "--resume"}, os.Environ()); err != nil {
+	if err := syscall.Exec(bin, []string{"kiro-cli", "chat", "--resume-id", s.SessionID}, os.Environ()); err != nil {
 		fmt.Fprintf(os.Stderr, "exec failed: %v\n", err)
 		os.Exit(1)
 	}
