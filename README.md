@@ -38,6 +38,7 @@ Kiro CLI saves sessions per-directory. If you work across many projects, finding
 - **Global search** — find conversations across all directories
 - **Full-text fuzzy search** — searches every message, not just titles
 - **Markdown preview** — rendered markdown, code blocks, tables
+- **Tree view** — press `v` to group sessions by directory (collapsible)
 - **Fullscreen mode** — press `f` for wide content like tables
 - **One-key resume** — `Ctrl+R` to continue a conversation in Kiro CLI
 - **Copy to clipboard** — `Ctrl+Y` to copy an entire conversation
@@ -45,7 +46,7 @@ Kiro CLI saves sessions per-directory. If you work across many projects, finding
 - **Text selection** — select and copy text directly from the preview
 - **All session formats** — reads JSONL (new TUI mode) and SQLite (--classic / --legacy-ui)
 - **Fast** — 200ms startup, instant search, background indexing
-- **Configurable** — toggle SQLite loading, full-text indexing via settings (`s`)
+- **Configurable** — toggle SQLite loading, full-text indexing, default view via settings (`s`)
 
 ## Session data locations
 
@@ -89,6 +90,7 @@ Run from anywhere. It searches globally.
 | `j` / `k` or `↑` / `↓` | Navigate list or scroll preview |
 | `l` / `Enter` | Open preview pane |
 | `h` / `Esc` | Back to list |
+| `v` | Toggle list/tree view |
 | `f` | Fullscreen preview |
 | `d` / `u` | Half-page scroll in preview |
 | `g` / `G` | Jump to top / bottom |
@@ -116,6 +118,7 @@ Press `s` to open settings. Config saved to `~/.config/kiro-cli-history/config.j
 |---------|---------|-------------|
 | Load classic mode chats | ON | Load SQLite sessions from --classic / --legacy-ui |
 | Full-text search classic chats | OFF | Index classic chat content (slow on large DBs) |
+| Default sidebar view | list | Start in list or tree view |
 
 ### Searching
 

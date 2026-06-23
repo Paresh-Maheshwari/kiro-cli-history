@@ -8,13 +8,15 @@ import (
 
 // Config holds user preferences.
 type Config struct {
-	SQLiteEnabled bool `json:"sqlite_enabled"` // load classic mode SQLite sessions
-	SQLiteIndex   bool `json:"sqlite_index"`   // full-text index SQLite content (slow on large DBs)
+	SQLiteEnabled bool   `json:"sqlite_enabled"` // load classic mode SQLite sessions
+	SQLiteIndex   bool   `json:"sqlite_index"`   // full-text index SQLite content
+	DefaultView   string `json:"default_view"`   // "list" or "tree"
 }
 
 var DefaultConfig = Config{
 	SQLiteEnabled: true,
-	SQLiteIndex:   false, // off by default — too slow for large DBs
+	SQLiteIndex:   false,
+	DefaultView:   "list",
 }
 
 var AppConfig = DefaultConfig

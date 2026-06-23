@@ -58,40 +58,53 @@ func (m Model) View() string {
 	}
 	searchBar := box.Render(inputView)
 
-	// Session list with scrolling
-	perItem := 3
-	maxVis := lh / perItem
-	if maxVis < 1 {
-		maxVis = 1
-	}
-	start := 0
-	if m.Cursor >= maxVis {
-		start = m.Cursor - maxVis + 1
-	}
-
+	// Sidebar content (list or tree view)
 	var lines []string
-	for i := start; i < len(m.Filtered) && len(lines) < lh; i++ {
-		s := m.Filtered[i]
-		title := s.Title
-		if len(title) > lw-4 {
-			title = title[:lw-7] + "..."
+	if m.ViewMode == ViewTree && len(m.FlatTree) > 0 {
+		// Tree view
+		start := 0
+		maxVis := lh
+		if m.TreeCursor >= maxVis {
+			start = m.TreeCursor - maxVis + 1
 		}
-		cwd := filepath.Base(s.Cwd)
-		date := FmtDate(s.UpdatedAt)
-		msgs := fmt.Sprintf("%d msgs", s.MsgCount)
-		dur := FmtDur(s.DurationMin)
-		meta := cwd + "  " + date + "  " + msgs + "  " + dur
+		for i := start; i < len(m.FlatTree) && len(lines) < lh; i++ {
+			node := m.FlatTree[i]
+			lines = append(lines, RenderTreeNode(node, lw-2, i == m.TreeCursor))
+		}
+	} else {
+		// List view
+		perItem := 3
+		maxVis := lh / perItem
+		if maxVis < 1 {
+			maxVis = 1
+		}
+		start := 0
+		if m.Cursor >= maxVis {
+			start = m.Cursor - maxVis + 1
+		}
+		for i := start; i < len(m.Filtered) && len(lines) < lh; i++ {
+			s := m.Filtered[i]
+			title := s.Title
+			if len(title) > lw-4 {
+				title = title[:lw-7] + "..."
+			}
+			cwd := filepath.Base(s.Cwd)
+			date := FmtDate(s.UpdatedAt)
+			msgs := fmt.Sprintf("%d msgs", s.MsgCount)
+			dur := FmtDur(s.DurationMin)
+			meta := cwd + "  " + date + "  " + msgs + "  " + dur
 
-		if i == m.Cursor {
-			lines = append(lines,
-				SelectedStyle.Width(lw-2).Render(title),
-				SelectedStyle.Width(lw-2).Render(meta),
-				"")
-		} else {
-			lines = append(lines,
-				TitleStyle.Render(title),
-				DimStyle.Render(cwd)+"  "+DimStyle.Render(date)+"  "+CyanStyle.Render(msgs)+"  "+GreenStyle.Render(dur),
-				"")
+			if i == m.Cursor {
+				lines = append(lines,
+					SelectedStyle.Width(lw-2).Render(title),
+					SelectedStyle.Width(lw-2).Render(meta),
+					"")
+			} else {
+				lines = append(lines,
+					TitleStyle.Render(title),
+					DimStyle.Render(cwd)+"  "+DimStyle.Render(date)+"  "+CyanStyle.Render(msgs)+"  "+GreenStyle.Render(dur),
+					"")
+			}
 		}
 	}
 	for len(lines) < lh {
@@ -143,7 +156,11 @@ func (m Model) View() string {
 		hints = hint("Enter", " list") + sep + hint("Tab", " preview") + sep + hint("Ctrl+R", " resume") + sep + hint("?", " help")
 	case FocusList:
 		mode = modeList.Render(" LIST ")
-		hints = hint("/", " search") + sep + hint("l", " preview") + sep + hint("f", " full") + sep + hint("s", " settings") + sep + hint("Ctrl+R", " resume") + sep + hint("?", " help")
+		viewHint := "v tree"
+		if m.ViewMode == ViewTree {
+			viewHint = "v list"
+		}
+		hints = hint("/", " search") + sep + hint("l", " preview") + sep + hint("f", " full") + sep + hint(viewHint, "") + sep + hint("s", " settings") + sep + hint("?", " help")
 	case FocusPreview:
 		mode = modePreview.Render(" PREVIEW ")
 		hints = hint("j/k", " scroll") + sep + hint("d/u", " page") + sep + hint("f", " full") + sep + hint("h", " back") + sep + hint("s", " settings") + sep + hint("?", " help")

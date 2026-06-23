@@ -60,6 +60,7 @@ func RenderHelp(w, h, scroll int) string {
 		helpLine("    Ctrl+R       ", "Resume in Kiro"),
 		helpLine("    Ctrl+Y       ", "Copy chat"),
 		helpLine("    Ctrl+E       ", "Export as markdown"),
+		helpLine("    v            ", "Toggle list/tree view"),
 		helpLine("    s            ", "Settings"),
 		helpLine("    ?            ", "This help"),
 		helpLine("    Ctrl+C       ", "Quit"),

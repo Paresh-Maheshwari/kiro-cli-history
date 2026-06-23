@@ -46,6 +46,11 @@ func RenderSettings(w, h, cursor int) string {
 		{"2", "Full-text search in classic chats", cfg.SQLiteIndex},
 	}
 
+	viewLabel := "list"
+	if cfg.DefaultView == "tree" {
+		viewLabel = "tree"
+	}
+
 	body := title + "\n" + sep + "\n\n"
 	for _, item := range items {
 		toggle := off.Render("  ○ OFF")
@@ -58,8 +63,13 @@ func RenderSettings(w, h, cursor int) string {
 			toggle,
 		)
 	}
+	body += fmt.Sprintf("  %s  %s %s\n\n",
+		key.Render("[3]"),
+		desc.Render("Default sidebar view"),
+		on.Render("  "+viewLabel),
+	)
 
-	body += hint.Render("  Press 1/2 to toggle · s/Esc to close") + "\n" +
+	body += hint.Render("  Press 1/2/3 to toggle · s/Esc to close") + "\n" +
 		hint.Render("  Changes apply on next launch")
 
 	box := lipgloss.NewStyle().

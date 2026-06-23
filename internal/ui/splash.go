@@ -49,7 +49,7 @@ func RenderSplash(w, h int, spinnerView string) string {
 	c := center(cw)
 
 	logo := splashLogo.Render(asciiLogo)
-	title := c.Render(splashSub.Render("─── ") + splashVer.Render("CLI HISTORY v1.0.0") + splashSub.Render(" ───"))
+	title := c.Render(splashSub.Render("─── ") + splashVer.Render("CLI HISTORY v1.1.0") + splashSub.Render(" ───"))
 	tagline := c.Render(splashSub.Render("Search · Browse · Resume"))
 	loading := c.Render(spinnerView + splashSub.Render(" Loading sessions..."))
 	credit := c.Render(splashCredit.Render("crafted by ") + splashCreditName.Render("Paresh Maheshwari"))
