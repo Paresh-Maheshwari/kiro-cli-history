@@ -83,26 +83,38 @@ func (m Model) View() string {
 			start = m.Cursor - maxVis + 1
 		}
 		for i := start; i < len(m.Filtered) && len(lines) < lh; i++ {
-			s := m.Filtered[i]
+			s := &m.Filtered[i]
 			title := s.Title
-			if len(title) > lw-4 {
-				title = title[:lw-7] + "..."
+			if s.IsSubagent() {
+				title = "⑂ " + title
 			}
+			title = fit(title, lw-2)
 			cwd := filepath.Base(s.Cwd)
 			date := FmtDate(s.UpdatedAt)
 			msgs := fmt.Sprintf("%d msgs", s.MsgCount)
+			if m.Indexing && s.MsgCount == 0 {
+				msgs = "… msgs"
+			}
 			dur := FmtDur(s.DurationMin)
+			badge := relBadges(s)
 			meta := cwd + "  " + date + "  " + msgs + "  " + dur
+			if badge != "" {
+				meta += "  " + badge
+			}
 
 			if i == m.Cursor {
 				lines = append(lines,
 					SelectedStyle.Width(lw-2).Render(title),
-					SelectedStyle.Width(lw-2).Render(meta),
+					SelectedStyle.Width(lw-2).Render(fit(meta, lw-2)),
 					"")
 			} else {
+				styled := DimStyle.Render(cwd) + "  " + DimStyle.Render(date) + "  " + CyanStyle.Render(msgs) + "  " + GreenStyle.Render(dur)
+				if badge != "" {
+					styled += "  " + CyanStyle.Render(badge)
+				}
 				lines = append(lines,
 					TitleStyle.Render(title),
-					DimStyle.Render(cwd)+"  "+DimStyle.Render(date)+"  "+CyanStyle.Render(msgs)+"  "+GreenStyle.Render(dur),
+					fit(styled, lw-2),
 					"")
 			}
 		}
@@ -141,7 +153,7 @@ func (m Model) View() string {
 	)
 	hint := func(k, d string) string { return hintKey.Render(k) + hintDesc.Render(d) }
 
-	count := fmt.Sprintf(" %d/%d", len(m.Filtered), len(m.All))
+	count := fmt.Sprintf(" %d/%d", len(m.Filtered), m.TotalRows)
 	if m.Indexing {
 		count += " ⟳"
 	}

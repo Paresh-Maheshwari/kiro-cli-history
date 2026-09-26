@@ -69,8 +69,26 @@ func RenderSettings(w, h, cursor int) string {
 		on.Render("  "+viewLabel),
 	)
 
-	body += hint.Render("  Press 1/2/3 to toggle · s/Esc to close") + "\n" +
-		hint.Render("  Changes apply on next launch")
+	for _, item := range []struct {
+		k, d string
+		v    bool
+	}{
+		{"4", "Nest subagents under parent", cfg.HideSubagents},
+		{"5", "Collapse rewind versions", cfg.CollapseRewinds},
+	} {
+		toggle := off.Render("  ○ OFF")
+		if item.v {
+			toggle = on.Render("  ● ON ")
+		}
+		body += fmt.Sprintf("  %s  %s %s\n\n",
+			key.Render("["+item.k+"]"),
+			desc.Render(item.d),
+			toggle,
+		)
+	}
+
+	body += hint.Render("  Press 1-5 to toggle · s/Esc to close") + "\n" +
+		hint.Render("  1-3 apply on next launch · 4-5 apply now")
 
 	box := lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).

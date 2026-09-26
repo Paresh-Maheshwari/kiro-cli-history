@@ -4,6 +4,9 @@ import (
 	"fmt"
 	"path/filepath"
 	"sort"
+	"strings"
+
+	"github.com/charmbracelet/x/ansi"
 
 	"kiro-cli-history/internal/session"
 )
@@ -16,54 +19,70 @@ const (
 	ViewTree
 )
 
-// TreeNode represents a directory or session in the tree.
+// TreeNode is a directory, a session row, or a session nested under a row
+// (older rewind version or subagent).
 type TreeNode struct {
 	Name     string // directory name or session title
 	Path     string // full directory path
 	Session  *session.Session
 	Children []*TreeNode
+	Parent   *TreeNode
+	Depth    int
 	Expanded bool
 	IsDir    bool
+	Rel      string // "version" or "subagent" for nested sessions
 }
 
-// BuildTree groups sessions by cwd into a tree.
-// If expanded is true, all directories start expanded (used during search).
-func BuildTree(sessions []session.Session, expanded ...bool) []*TreeNode {
-	autoExpand := len(expanded) > 0 && expanded[0]
-	// Group by cwd
-	groups := make(map[string][]session.Session)
-	for i := range sessions {
-		cwd := sessions[i].Cwd
+// Key identifies a node across rebuilds (to keep expand state and cursor).
+func (n *TreeNode) Key() string {
+	if n.IsDir {
+		return "d:" + n.Path
+	}
+	if n.Session != nil {
+		return "s:" + n.Session.SessionID + "|" + n.Session.Cwd
+	}
+	return ""
+}
+
+// BuildTree groups rows by cwd; children (from session.Collapse) are nested
+// under their row. autoExpand opens all directories (used while searching).
+func BuildTree(rows []session.Session, children map[string][]session.Session, autoExpand bool) []*TreeNode {
+	groups := make(map[string][]int)
+	for i := range rows {
+		cwd := rows[i].Cwd
 		if cwd == "" {
 			cwd = "(unknown)"
 		}
-		groups[cwd] = append(groups[cwd], sessions[i])
+		groups[cwd] = append(groups[cwd], i)
 	}
-
-	// Sort directories
 	dirs := make([]string, 0, len(groups))
 	for d := range groups {
 		dirs = append(dirs, d)
 	}
 	sort.Strings(dirs)
 
-	var tree []*TreeNode
+	tree := make([]*TreeNode, 0, len(dirs))
 	for _, dir := range dirs {
-		dirNode := &TreeNode{
-			Name:     filepath.Base(dir),
-			Path:     dir,
-			IsDir:    true,
-			Expanded: autoExpand,
+		dn := &TreeNode{Name: filepath.Base(dir), Path: dir, IsDir: true, Expanded: autoExpand}
+		for _, i := range groups[dir] {
+			row := &rows[i]
+			sn := &TreeNode{Name: row.Title, Session: row, Parent: dn, Depth: 1}
+			if row.SessionID != "" {
+				kids := children[row.SessionID]
+				for j := range kids {
+					c := &kids[j]
+					rel := "subagent"
+					if session.IsVersionOf(c, row) {
+						rel = "version"
+					}
+					sn.Children = append(sn.Children, &TreeNode{
+						Name: c.Title, Session: c, Parent: sn, Depth: 2, Rel: rel,
+					})
+				}
+			}
+			dn.Children = append(dn.Children, sn)
 		}
-		for i := range groups[dir] {
-			s := groups[dir][i]
-			dirNode.Children = append(dirNode.Children, &TreeNode{
-				Name:    s.Title,
-				Session: &s,
-				IsDir:   false,
-			})
-		}
-		tree = append(tree, dirNode)
+		tree = append(tree, dn)
 	}
 	return tree
 }
@@ -71,55 +90,83 @@ func BuildTree(sessions []session.Session, expanded ...bool) []*TreeNode {
 // FlattenTree returns visible nodes (respecting expanded/collapsed state).
 func FlattenTree(tree []*TreeNode) []*TreeNode {
 	var flat []*TreeNode
-	for _, node := range tree {
-		flat = append(flat, node)
-		if node.IsDir && node.Expanded {
-			for _, child := range node.Children {
-				flat = append(flat, child)
+	var walk func([]*TreeNode)
+	walk = func(nodes []*TreeNode) {
+		for _, n := range nodes {
+			flat = append(flat, n)
+			if n.Expanded {
+				walk(n.Children)
 			}
 		}
 	}
+	walk(tree)
 	return flat
+}
+
+// fit truncates s (which may contain ANSI styles) to w terminal cells.
+func fit(s string, w int) string {
+	if w < 1 {
+		w = 1
+	}
+	return ansi.Truncate(s, w, "…")
+}
+
+// relBadges renders "↺3 ⑂6" style counts for a row with nested sessions.
+func relBadges(s *session.Session) string {
+	var b []string
+	if s.Versions > 0 {
+		b = append(b, fmt.Sprintf("↺%d", s.Versions))
+	}
+	if s.Subagents > 0 {
+		b = append(b, fmt.Sprintf("⑂%d", s.Subagents))
+	}
+	return strings.Join(b, " ")
 }
 
 // RenderTreeNode renders one node for display in the sidebar.
 func RenderTreeNode(node *TreeNode, width int, selected bool) string {
-	if width < 20 {
-		width = 20
+	if width < 10 {
+		width = 10
 	}
-	if node.IsDir {
-		icon := "▸"
+	indent := strings.Repeat("  ", node.Depth)
+	icon := " "
+	if len(node.Children) > 0 {
+		icon = "▸"
 		if node.Expanded {
 			icon = "▾"
 		}
-		name := node.Name
-		count := formatCount(len(node.Children))
-		maxName := width - 16 // room for icon + 📁 + count + padding
-		if maxName < 4 {
-			maxName = 4
-		}
-		if len(name) > maxName {
-			name = name[:maxName] + "…"
-		}
-		if selected {
-			return SelectedStyle.Width(width).Render(fmt.Sprintf("%s %s (%s)", icon, name, count))
-		}
-		return fmt.Sprintf("%s 📁 %s %s", icon, name, DimStyle.Render(count))
 	}
 
-	// Session node (indented)
-	title := node.Name
-	maxTitle := width - 8 // room for indent + ellipsis
-	if maxTitle < 4 {
-		maxTitle = 4
+	if node.IsDir {
+		count := formatCount(len(node.Children))
+		if selected {
+			return SelectedStyle.Width(width).Render(fit(fmt.Sprintf("%s%s %s (%s)", indent, icon, node.Name, count), width))
+		}
+		head := indent + icon + " 📁 "
+		tail := " " + count
+		name := fit(node.Name, width-ansi.StringWidth(head)-ansi.StringWidth(tail))
+		return fit(head+name+DimStyle.Render(tail), width)
 	}
-	if len(title) > maxTitle {
-		title = title[:maxTitle] + "…"
+
+	prefix := ""
+	switch node.Rel {
+	case "version":
+		prefix = "↺ "
+	case "subagent":
+		prefix = "⑂ "
 	}
+	head := indent + icon + " " + prefix
+	badge := ""
+	if node.Session != nil {
+		if b := relBadges(node.Session); b != "" {
+			badge = " " + b
+		}
+	}
+	title := fit(node.Name, width-ansi.StringWidth(head)-ansi.StringWidth(badge))
 	if selected {
-		return SelectedStyle.Width(width).Render("    " + title)
+		return SelectedStyle.Width(width).Render(fit(head+title+badge, width))
 	}
-	return "    " + DimStyle.Render(title)
+	return fit(head+DimStyle.Render(title)+CyanStyle.Render(badge), width)
 }
 
 func formatCount(n int) string {

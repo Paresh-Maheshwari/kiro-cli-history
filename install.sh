@@ -17,7 +17,9 @@ fi
 
 echo "Building..."
 cd "$(dirname "$0")"
-go build -o "$BIN_NAME" .
+# The bundled SQLite C source triggers harmless const-qualifier warnings
+# with newer GCC; hide them without overriding the user's own flags.
+CGO_CFLAGS="${CGO_CFLAGS:--O2 -g} -Wno-discarded-qualifiers" go build -o "$BIN_NAME" .
 
 # Install binary
 mkdir -p "$INSTALL_DIR"

@@ -8,15 +8,19 @@ import (
 
 // Config holds user preferences.
 type Config struct {
-	SQLiteEnabled bool   `json:"sqlite_enabled"` // load classic mode SQLite sessions
-	SQLiteIndex   bool   `json:"sqlite_index"`   // full-text index SQLite content
-	DefaultView   string `json:"default_view"`   // "list" or "tree"
+	SQLiteEnabled   bool   `json:"sqlite_enabled"`   // load classic mode SQLite sessions
+	SQLiteIndex     bool   `json:"sqlite_index"`     // full-text index SQLite content
+	DefaultView     string `json:"default_view"`     // "list" or "tree"
+	HideSubagents   bool   `json:"hide_subagents"`   // nest subagent sessions under their parent
+	CollapseRewinds bool   `json:"collapse_rewinds"` // show only the newest rewind version
 }
 
 var DefaultConfig = Config{
-	SQLiteEnabled: true,
-	SQLiteIndex:   false,
-	DefaultView:   "list",
+	SQLiteEnabled:   true,
+	SQLiteIndex:     false,
+	DefaultView:     "list",
+	HideSubagents:   true,
+	CollapseRewinds: true,
 }
 
 var AppConfig = DefaultConfig

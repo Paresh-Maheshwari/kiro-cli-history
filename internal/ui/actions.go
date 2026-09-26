@@ -15,10 +15,11 @@ import (
 
 // DoResume sets the session to resume and quits the TUI.
 func (m *Model) DoResume() (Model, tea.Cmd) {
-	if len(m.Filtered) == 0 || m.Cursor >= len(m.Filtered) {
+	cur := m.current()
+	if cur == nil {
 		return *m, nil
 	}
-	s := m.Filtered[m.Cursor]
+	s := *cur
 	if s.Cwd == "" {
 		m.SetNote("No directory for this session")
 		return *m, nil
@@ -29,10 +30,11 @@ func (m *Model) DoResume() (Model, tea.Cmd) {
 
 // DoCopy copies the current session's conversation to clipboard.
 func (m *Model) DoCopy() {
-	if len(m.Filtered) == 0 || m.Cursor >= len(m.Filtered) {
+	cur := m.current()
+	if cur == nil {
 		return
 	}
-	msgs := session.ExtractMessages(m.Filtered[m.Cursor], 0)
+	msgs := session.ExtractMessages(*cur, 0)
 	if len(msgs) == 0 {
 		m.SetNote("No messages to copy")
 		return
@@ -72,10 +74,11 @@ func (m *Model) DoCopy() {
 
 // DoExport saves the current session as a markdown file.
 func (m *Model) DoExport() {
-	if len(m.Filtered) == 0 || m.Cursor >= len(m.Filtered) {
+	cur := m.current()
+	if cur == nil {
 		return
 	}
-	s := m.Filtered[m.Cursor]
+	s := *cur
 	msgs := session.ExtractMessages(s, 0)
 	if len(msgs) == 0 {
 		m.SetNote("No messages to export")

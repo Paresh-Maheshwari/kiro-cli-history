@@ -25,13 +25,26 @@ func FirstPrompt(raw []json.RawMessage) string {
 	for _, r := range raw {
 		user, _ := parseEntry(r)
 		if txt := promptFromUser(user); txt != "" {
-			if len(txt) > 60 {
-				return txt[:60]
-			}
-			return txt
+			return Truncate(txt, 60)
 		}
 	}
 	return "(untitled)"
+}
+
+// Truncate shortens s to at most n runes, adding "…" when cut. It never
+// splits a multi-byte character.
+func Truncate(s string, n int) string {
+	if n <= 0 {
+		return ""
+	}
+	i := 0
+	for pos := range s {
+		if i == n {
+			return strings.TrimRight(s[:pos], " ") + "…"
+		}
+		i++
+	}
+	return s
 }
 
 func extractHistoryMsgs(raw []json.RawMessage, limit int) []Msg {

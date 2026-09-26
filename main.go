@@ -12,7 +12,7 @@ import (
 	"kiro-cli-history/internal/ui"
 )
 
-const version = "1.1.0"
+const version = "1.2.0"
 
 func main() {
 	if len(os.Args) > 1 {
@@ -31,6 +31,7 @@ Keyboard:
   Tab        Cycle focus (search → list → preview)
   j/k        Navigate list or scroll preview
   l/Enter    Open preview
+  v          Toggle list/tree view (tree: h/l collapse/expand)
   f          Fullscreen preview
   Ctrl+R     Resume session in Kiro CLI
   Ctrl+Y     Copy conversation to clipboard
@@ -51,6 +52,7 @@ Config: ~/.config/kiro-cli-history/config.json
 		}
 	}
 
+	ui.Version = version
 	session.LoadConfig()
 	defer session.CloseDB()
 

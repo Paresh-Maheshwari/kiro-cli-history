@@ -2,258 +2,180 @@ package session
 
 import (
 	"encoding/json"
-	"os"
 	"runtime"
 	"sort"
 	"strings"
 	"sync"
 )
 
-// LoadAll loads all sessions, deduplicates, sorts, and builds a quick index (title+cwd only).
+// LoadAll loads all sessions, deduplicates, sorts newest first, links
+// rewind/subagent relationships and builds a quick index (title + cwd).
 func LoadAll() []Session {
-	jsonl := LoadJSONL()
+	out := LoadJSONL()
 
 	var sqlite []Session
 	if AppConfig.SQLiteEnabled {
 		sqlite = LoadSQLite()
 	}
 
-	seen := make(map[string]bool, len(jsonl))
-	for _, s := range jsonl {
+	seen := make(map[string]bool, len(out))
+	for _, s := range out {
 		if s.SessionID != "" {
 			seen[s.SessionID] = true
 		}
 	}
 	for _, s := range sqlite {
 		if s.SessionID != "" && !seen[s.SessionID] {
-			jsonl = append(jsonl, s)
+			out = append(out, s)
 			seen[s.SessionID] = true
 		}
 	}
 
-	sort.Slice(jsonl, func(i, j int) bool {
-		a, b := jsonl[i].UpdatedAt, jsonl[j].UpdatedAt
-		if a == "" {
-			a = jsonl[i].CreatedAt
-		}
-		if b == "" {
-			b = jsonl[j].CreatedAt
-		}
-		return a > b
+	sort.SliceStable(out, func(i, j int) bool {
+		return sortKey(&out[i]) > sortKey(&out[j])
 	})
-
-	for i := range jsonl {
-		jsonl[i].SearchText = strings.ToLower(jsonl[i].Title) + "\n" + strings.ToLower(jsonl[i].Cwd) + "\n"
+	Link(out)
+	for i := range out {
+		out[i].SearchText = baseSearchText(&out[i])
 	}
-	return jsonl
+	return out
 }
 
-// BuildFullIndex adds message content to the search index in the background.
-func BuildFullIndex(sessions []Session, mu *sync.RWMutex, done func()) {
-	// Index JSONL sessions in parallel (file I/O, no shared state)
+func sortKey(s *Session) string {
+	if s.UpdatedAt != "" {
+		return s.UpdatedAt
+	}
+	return s.CreatedAt
+}
+
+func baseSearchText(s *Session) string {
+	return strings.ToLower(s.Title) + "\n" + strings.ToLower(s.Cwd) + "\n"
+}
+
+// IndexResult is the full-text data for one session. It is computed off the
+// UI goroutine and applied with ApplyIndex, so sessions are never mutated
+// concurrently.
+type IndexResult struct {
+	Done  bool
+	Text  string // lowercased message text, appended to SearchText
+	Count int    // visible messages (same rules as the preview)
+	Title string // replacement title; "" keeps the current one
+}
+
+// BuildFullIndex reads message content for every session. It only reads
+// sessions; results[i] belongs to sessions[i].
+func BuildFullIndex(sessions []Session) []IndexResult {
+	res := make([]IndexResult, len(sessions))
+
+	workers := runtime.NumCPU() - 1 // leave a core for the UI
+	if workers < 1 {
+		workers = 1
+	}
+	jobs := make(chan int)
 	var wg sync.WaitGroup
-	workers := runtime.NumCPU()
-	if workers > 1 {
-		workers = workers - 1 // leave 1 core for UI
-	}
-	sem := make(chan struct{}, workers)
-
-	for i := range sessions {
-		if sessions[i].JSONLPath == "" {
-			continue
-		}
+	for w := 0; w < workers; w++ {
 		wg.Add(1)
-		go func(idx int) {
+		go func() {
 			defer wg.Done()
-			sem <- struct{}{}
-			defer func() { <-sem }()
-
-			text := indexJSONLFast(sessions[idx].JSONLPath)
-			count := countFast(sessions[idx].JSONLPath)
-
-			mu.Lock()
-			if text != "" {
-				sessions[idx].SearchText += text
+			for i := range jobs {
+				text, count := indexJSONL(sessions[i].JSONLPath)
+				res[i] = IndexResult{Done: true, Text: text, Count: count}
 			}
-			sessions[idx].MsgCount = count
-			mu.Unlock()
-		}(i)
+		}()
 	}
+	for i := range sessions {
+		if sessions[i].JSONLPath != "" {
+			jobs <- i
+		}
+	}
+	close(jobs)
 	wg.Wait()
 
-	// Index SQLite sessions (if enabled)
-	if !AppConfig.SQLiteEnabled {
-		if done != nil {
-			done()
-		}
+	if AppConfig.SQLiteEnabled && AppConfig.SQLiteIndex {
+		indexSQLite(sessions, res)
+	}
+	return res
+}
+
+// ApplyIndex copies index results into sessions. Call from the UI goroutine.
+func ApplyIndex(sessions []Session, res []IndexResult) {
+	if len(res) != len(sessions) {
 		return
 	}
+	for i := range res {
+		r := &res[i]
+		if !r.Done {
+			continue
+		}
+		s := &sessions[i]
+		if r.Title != "" {
+			s.Title = r.Title
+		}
+		s.MsgCount = r.Count
+		s.SearchText = baseSearchText(s) + r.Text
+	}
+}
+
+// indexSQLite fills results for classic-mode sessions (full content scan).
+func indexSQLite(sessions []Session, res []IndexResult) {
 	conn := openDB()
-	if conn != nil {
-		// Build index: sessionID/cwd → slice index
-		sqlIdx := make(map[string]int)
-		for i := range sessions {
-			s := &sessions[i]
-			if s.Source == "sqlite_v2" {
-				sqlIdx[s.SessionID] = i
-			} else if s.Source == "sqlite_v1" {
-				sqlIdx["v1:"+s.Cwd] = i
-			}
+	if conn == nil {
+		return
+	}
+	v2 := make(map[string]int)
+	v1 := make(map[string]int)
+	for i := range sessions {
+		switch sessions[i].Source {
+		case "sqlite_v2":
+			v2[sessions[i].SessionID] = i
+		case "sqlite_v1":
+			v1[sessions[i].Cwd] = i
 		}
-
-		// Full content indexing (only if enabled — slow on large DBs)
-		if AppConfig.SQLiteIndex && len(sqlIdx) > 0 {
-			rows, err := conn.Query("SELECT conversation_id, value FROM conversations_v2")
-			if err == nil {
-				for rows.Next() {
-					var id, value string
-					if rows.Scan(&id, &value) != nil {
-						continue
-					}
-					idx, ok := sqlIdx[id]
-					if !ok {
-						value = ""
-						continue
-					}
-					processSQLiteValue(sessions, idx, value, mu)
-					value = ""
-				}
-				rows.Close()
-			}
+	}
+	scan := func(query string, idx map[string]int) {
+		if len(idx) == 0 {
+			return
 		}
-
-		// Single scan of conversations (v1)
-		if AppConfig.SQLiteIndex {
-			rows, err := conn.Query("SELECT key, value FROM conversations")
-			if err == nil {
-				for rows.Next() {
-					var key, value string
-					if rows.Scan(&key, &value) != nil {
-						continue
-					}
-					idx, ok := sqlIdx["v1:"+key]
-					if !ok {
-						continue
-					}
-					processSQLiteValue(sessions, idx, value, mu)
-					value = ""
-				}
-				rows.Close()
+		rows, err := conn.Query(query)
+		if err != nil {
+			return
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var key, value string
+			if rows.Scan(&key, &value) != nil {
+				continue
+			}
+			if i, ok := idx[key]; ok {
+				res[i] = sqliteResult(value)
 			}
 		}
 	}
-
-	if done != nil {
-		done()
-	}
+	scan("SELECT conversation_id, value FROM conversations_v2", v2)
+	scan("SELECT key, value FROM conversations", v1)
 }
 
-// indexJSONLFast extracts text content from JSONL using lightweight JSON parsing.
-// Only parses the "data" field of Prompt/AssistantMessage lines.
-func indexJSONLFast(path string) string {
-	info, err := os.Stat(path)
-	if err != nil || info.Size() == 0 || info.Size() > MaxFileSize {
-		return ""
-	}
-
-	f, err := os.Open(path)
-	if err != nil {
-		return ""
-	}
-	defer f.Close()
-
-	var b strings.Builder
-	dec := json.NewDecoder(f)
-	for dec.More() {
-		var line struct {
-			Kind string          `json:"kind"`
-			Data json.RawMessage `json:"data"`
-		}
-		if dec.Decode(&line) != nil {
-			break
-		}
-		if line.Kind != "Prompt" && line.Kind != "AssistantMessage" {
-			continue
-		}
-		// Extract text blocks only
-		var d struct {
-			Content []struct {
-				Kind string `json:"kind"`
-				Data string `json:"data"`
-			} `json:"content"`
-		}
-		if json.Unmarshal(line.Data, &d) != nil {
-			continue
-		}
-		for _, block := range d.Content {
-			if block.Kind == "text" && block.Data != "" {
-				b.WriteString(strings.ToLower(block.Data))
-				b.WriteByte('\n')
-				break
-			}
-		}
-	}
-	return b.String()
-}
-
-// indexSQLiteBulk loads all sessions of a given source type in one query.
-// processSQLiteValue parses one conversation blob, extracts title + search text + msg count.
-func processSQLiteValue(sessions []Session, idx int, value string, mu *sync.RWMutex) {
+// sqliteResult parses one conversation blob into an IndexResult.
+func sqliteResult(value string) IndexResult {
 	var d struct {
 		History []json.RawMessage `json:"history"`
 	}
 	if json.Unmarshal([]byte(value), &d) != nil {
-		return
+		return IndexResult{}
 	}
-
-	// Title from first prompt
-	title := ""
+	r := IndexResult{Done: true}
 	if len(d.History) > 0 {
-		title = FirstPrompt(d.History[:1])
+		if t := FirstPrompt(d.History[:1]); t != "(untitled)" {
+			r.Title = cleanTitle(t)
+		}
 	}
-
-	// Extract all message text for search
 	msgs := extractHistoryMsgs(d.History, 0)
-	d.History = nil
-
 	var b strings.Builder
-	if title != "" && title != "(untitled)" {
-		b.WriteString(strings.ToLower(title))
-		b.WriteByte('\n')
-	}
-	b.WriteString(strings.ToLower(sessions[idx].Cwd))
-	b.WriteByte('\n')
 	for _, m := range msgs {
 		b.WriteString(strings.ToLower(m.Text))
 		b.WriteByte('\n')
 	}
-	count := len(msgs)
-	msgs = nil
-
-	mu.Lock()
-	if title != "" && title != "(untitled)" {
-		sessions[idx].Title = title
-	}
-	sessions[idx].SearchText = b.String()
-	sessions[idx].MsgCount = count
-	mu.Unlock()
-}
-
-// findPromptInPeek extracts the first user prompt from a truncated JSON string.
-func findPromptInPeek(peek string) string {
-	key := `"prompt":"`
-	pos := strings.Index(peek, key)
-	if pos < 0 {
-		return ""
-	}
-	start := pos + len(key)
-	end := strings.Index(peek[start:], `"`)
-	if end <= 0 {
-		return ""
-	}
-	txt := peek[start : start+end]
-	if len(txt) > 60 {
-		return txt[:60]
-	}
-	return txt
+	r.Text = b.String()
+	r.Count = len(msgs)
+	return r
 }

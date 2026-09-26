@@ -2,8 +2,7 @@ package ui
 
 import (
 	"fmt"
-	"runtime"
-	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/charmbracelet/bubbles/spinner"
@@ -16,9 +15,12 @@ import (
 	"kiro-cli-history/internal/session"
 )
 
+// Version is shown on the splash screen; set by main.
+var Version = "dev"
+
 type sessionsLoadedMsg struct{ Sessions []session.Session }
 type debounceMsg struct{ Query string }
-type indexDoneMsg struct{}
+type indexDoneMsg struct{ Results []session.IndexResult }
 
 // Focus tracks which pane has focus.
 type Focus int
@@ -30,32 +32,41 @@ const (
 )
 
 type Model struct {
-	All, Filtered []session.Session
-	Cursor        int
-	Input         textinput.Model
-	Preview       viewport.Model
-	Spinner       spinner.Model
-	W, H          int
-	Focus         Focus
-	ViewMode      ViewMode
-	Tree          []*TreeNode
-	FlatTree      []*TreeNode
-	TreeCursor    int
-	Loading       bool
-	Indexing      bool
-	ShowHelp      bool
-	HelpScroll    int
-	ShowSettings  bool
-	Fullscreen    bool
-	ResumeResult  *session.Session
-	Note          string
-	NoteExpiry    time.Time
-	PrevCache     map[string]string
-	PrevWidth     int
-	IndexMu       *sync.RWMutex
+	All          []session.Session            // every loaded session
+	Filtered     []session.Session            // visible rows (search + grouping)
+	Children     map[string][]session.Session // sessions nested under a row, by row SessionID
+	TotalRows    int                          // rows with no search query (status bar)
+	Cursor       int
+	Input        textinput.Model
+	Preview      viewport.Model
+	Spinner      spinner.Model
+	W, H         int
+	Focus        Focus
+	ViewMode     ViewMode
+	Tree         []*TreeNode
+	FlatTree     []*TreeNode
+	TreeCursor   int
+	Loading      bool
+	Indexing     bool
+	ShowHelp     bool
+	HelpScroll   int
+	ShowSettings bool
+	Fullscreen   bool
+	ResumeResult *session.Session
+	Note         string
+	NoteExpiry   time.Time
+	PrevCache    map[string]string
+	PrevWidth    int
+
+	// Lazy preview: the selected session's full render runs in the background.
+	pendingKey  string
+	pendingSess session.Session
+	pendingGen  uint64
+	pendingNew  bool // a full render needs scheduling
+	prevGen     *atomic.Uint64
 }
 
-// Keep InputFocused for backward compat in view.go
+// InputFocused reports whether the search bar has focus.
 func (m *Model) InputFocused() bool { return m.Focus == FocusSearch }
 
 func NewModel() Model {
@@ -76,7 +87,7 @@ func NewModel() Model {
 		ViewMode:  defaultViewMode(),
 		Loading:   true,
 		PrevCache: make(map[string]string),
-		IndexMu:   &sync.RWMutex{},
+		prevGen:   new(atomic.Uint64),
 	}
 }
 
@@ -113,61 +124,125 @@ func (m *Model) ListH() int {
 	return h
 }
 
+// current returns the selected session, or nil (e.g. a directory in tree view).
+func (m *Model) current() *session.Session {
+	if m.ViewMode == ViewTree {
+		if m.TreeCursor >= 0 && m.TreeCursor < len(m.FlatTree) {
+			return m.FlatTree[m.TreeCursor].Session
+		}
+		return nil
+	}
+	if m.Cursor >= 0 && m.Cursor < len(m.Filtered) {
+		return &m.Filtered[m.Cursor]
+	}
+	return nil
+}
+
+// refilter recomputes visible rows from All using the search query and the
+// grouping settings, then rebuilds the tree and preview.
+func (m *Model) refilter(resetCursor bool) {
+	cfg := session.AppConfig
+	cands := search.Sessions(m.Input.Value(), m.All)
+	m.Filtered, m.Children = session.Collapse(cands, cfg.CollapseRewinds, cfg.HideSubagents)
+	if m.Input.Value() == "" {
+		m.TotalRows = len(m.Filtered)
+	} else {
+		all, _ := session.Collapse(m.All, cfg.CollapseRewinds, cfg.HideSubagents)
+		m.TotalRows = len(all)
+	}
+	if resetCursor || m.Cursor >= len(m.Filtered) {
+		m.Cursor = 0
+	}
+	if m.ViewMode == ViewTree {
+		m.rebuildTree(resetCursor)
+	}
+	m.RefreshPreview()
+}
+
+// rebuildTree rebuilds the tree from Filtered, keeping expanded nodes and the
+// selected node when possible.
+func (m *Model) rebuildTree(resetCursor bool) {
+	expanded := make(map[string]bool)
+	for _, n := range FlattenTree(m.Tree) {
+		if n.Expanded {
+			expanded[n.Key()] = true
+		}
+	}
+	selected := ""
+	if !resetCursor && m.TreeCursor < len(m.FlatTree) {
+		selected = m.FlatTree[m.TreeCursor].Key()
+	}
+
+	m.Tree = BuildTree(m.Filtered, m.Children, m.Input.Value() != "")
+	var restore func([]*TreeNode)
+	restore = func(nodes []*TreeNode) {
+		for _, n := range nodes {
+			if expanded[n.Key()] {
+				n.Expanded = true
+			}
+			restore(n.Children)
+		}
+	}
+	restore(m.Tree)
+	m.FlatTree = FlattenTree(m.Tree)
+
+	m.TreeCursor = 0
+	for i, n := range m.FlatTree {
+		if selected != "" && n.Key() == selected {
+			m.TreeCursor = i
+			break
+		}
+	}
+}
+
+// Update handles a message, then schedules the full preview render if the
+// selection changed to a session that was only partially rendered.
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	switch msg := msg.(type) {
+	case previewTickMsg:
+		return m, m.startFullRender(msg.gen)
+	case previewDoneMsg:
+		m.applyFullRender(msg)
+		return m, nil
+	}
+	next, cmd := m.update(msg)
+	nm := next.(Model)
+	if pc := nm.previewCmd(); pc != nil {
+		cmd = tea.Batch(cmd, pc)
+	}
+	return nm, cmd
+}
+
+func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 
 	case sessionsLoadedMsg:
 		m.All = msg.Sessions
-		m.Filtered = msg.Sessions
 		m.Loading = false
 		m.Indexing = true
-		m.Cursor = 0
-		if m.ViewMode == ViewTree {
-			m.Tree = BuildTree(m.Filtered, false)
-			m.FlatTree = FlattenTree(m.Tree)
-		}
-		m.RefreshPreview()
-		// Start background full-text indexing
+		m.refilter(true)
+		// Full-text index in the background. It only reads sessions; results
+		// are applied here on the UI goroutine (no shared mutable state).
+		all := m.All
 		return m, func() tea.Msg {
-			session.BuildFullIndex(m.All, m.IndexMu, nil)
-			// Release resources after indexing
-			runtime.GC()
-			return indexDoneMsg{}
+			return indexDoneMsg{session.BuildFullIndex(all)}
 		}
 
 	case indexDoneMsg:
+		session.ApplyIndex(m.All, msg.Results)
 		m.Indexing = false
 		total := 0
 		for _, s := range m.All {
 			total += s.MsgCount
 		}
 		m.SetNote(fmt.Sprintf("Index ready — %d sessions, %d messages", len(m.All), total))
-		// Re-filter to pick up updated msg counts and search text
-		q := m.Input.Value()
-		if q == "" {
-			m.Filtered = m.All
-		} else {
-			m.Filtered = search.Sessions(q, m.All, m.IndexMu)
-		}
-		if m.ViewMode == ViewTree {
-			m.Tree = BuildTree(m.Filtered, m.Input.Value() != "")
-			m.FlatTree = FlattenTree(m.Tree)
-			m.TreeCursor = 0
-		}
 		m.PrevCache = make(map[string]string)
-		m.RefreshPreview()
+		m.refilter(false)
 		return m, nil
 
 	case debounceMsg:
 		if msg.Query == m.Input.Value() {
-			m.Filtered = search.Sessions(msg.Query, m.All, m.IndexMu)
-			m.Cursor = 0
-			if m.ViewMode == ViewTree {
-				m.Tree = BuildTree(m.Filtered, m.Input.Value() != "")
-				m.FlatTree = FlattenTree(m.Tree)
-				m.TreeCursor = 0
-			}
-			m.RefreshPreview()
+			m.refilter(true)
 		}
 		return m, nil
 
@@ -228,25 +303,33 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	// Settings overlay
 	if m.ShowSettings {
+		cfg := session.AppConfig
 		switch key {
 		case "s", "esc", "enter":
 			m.ShowSettings = false
 		case "1":
-			cfg := session.AppConfig
 			cfg.SQLiteEnabled = !cfg.SQLiteEnabled
 			session.SaveConfig(cfg)
 		case "2":
-			cfg := session.AppConfig
 			cfg.SQLiteIndex = !cfg.SQLiteIndex
 			session.SaveConfig(cfg)
 		case "3":
-			cfg := session.AppConfig
 			if cfg.DefaultView == "tree" {
 				cfg.DefaultView = "list"
 			} else {
 				cfg.DefaultView = "tree"
 			}
 			session.SaveConfig(cfg)
+		case "4":
+			cfg.HideSubagents = !cfg.HideSubagents
+			session.SaveConfig(cfg)
+			m.PrevCache = make(map[string]string)
+			m.refilter(false)
+		case "5":
+			cfg.CollapseRewinds = !cfg.CollapseRewinds
+			session.SaveConfig(cfg)
+			m.PrevCache = make(map[string]string)
+			m.refilter(false)
 		}
 		return m, nil
 	}
@@ -345,9 +428,7 @@ func (m Model) handleSearchKey(key string, msg tea.KeyMsg) (tea.Model, tea.Cmd) 
 	case "esc":
 		if m.Input.Value() != "" {
 			m.Input.SetValue("")
-			m.Filtered = m.All
-			m.Cursor = 0
-			m.RefreshPreview()
+			m.refilter(true)
 			return m, nil
 		}
 		m.Focus = FocusList
@@ -373,20 +454,56 @@ func (m Model) handleSearchKey(key string, msg tea.KeyMsg) (tea.Model, tea.Cmd) 
 	}
 }
 
+// moveCursor moves the list or tree cursor to pos (clamped).
+func (m *Model) moveCursor(pos int) {
+	n := len(m.Filtered)
+	if m.ViewMode == ViewTree {
+		n = len(m.FlatTree)
+	}
+	if pos > n-1 {
+		pos = n - 1
+	}
+	if pos < 0 {
+		pos = 0
+	}
+	if m.ViewMode == ViewTree {
+		m.TreeCursor = pos
+	} else {
+		m.Cursor = pos
+	}
+	m.RefreshPreview()
+}
+
+func (m *Model) cursorPos() int {
+	if m.ViewMode == ViewTree {
+		return m.TreeCursor
+	}
+	return m.Cursor
+}
+
 func (m Model) handleListKey(key string, msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch key {
 	case "esc":
 		return m, tea.Quit
 	case "v":
-		// Toggle view mode
 		if m.ViewMode == ViewList {
+			sel := m.current()
 			m.ViewMode = ViewTree
-			m.Tree = BuildTree(m.Filtered, m.Input.Value() != "")
-			m.FlatTree = FlattenTree(m.Tree)
-			m.TreeCursor = 0
+			m.rebuildTree(true)
+			m.selectInTree(sel)
 		} else {
+			// Keep the selected row when it is a top-level row.
+			if s := m.current(); s != nil {
+				for i := range m.Filtered {
+					if m.Filtered[i].SessionID == s.SessionID && m.Filtered[i].Cwd == s.Cwd {
+						m.Cursor = i
+						break
+					}
+				}
+			}
 			m.ViewMode = ViewList
 		}
+		m.RefreshPreview()
 		return m, nil
 	case "s":
 		m.ShowSettings = true
@@ -398,75 +515,78 @@ func (m Model) handleListKey(key string, msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.PrevCache = make(map[string]string)
 		m.RefreshPreview()
 		return m, nil
-	case "l", "enter":
+	case "l", "enter", "right":
 		if m.ViewMode == ViewTree {
-			// Expand/collapse dir or select session
-			if m.TreeCursor < len(m.FlatTree) {
-				node := m.FlatTree[m.TreeCursor]
-				if node.IsDir {
-					node.Expanded = !node.Expanded
-					m.FlatTree = FlattenTree(m.Tree)
-				} else if node.Session != nil {
-					m.Focus = FocusPreview
-				}
+			if m.TreeCursor >= len(m.FlatTree) {
+				return m, nil
+			}
+			node := m.FlatTree[m.TreeCursor]
+			switch {
+			case node.IsDir:
+				node.Expanded = !node.Expanded
+				m.FlatTree = FlattenTree(m.Tree)
+			case len(node.Children) > 0 && !node.Expanded:
+				node.Expanded = true
+				m.FlatTree = FlattenTree(m.Tree)
+			case node.Session != nil:
+				m.Focus = FocusPreview
 			}
 			return m, nil
 		}
-		// Switch to preview pane
 		m.Focus = FocusPreview
 		return m, nil
-	case "j", "down":
-		if m.ViewMode == ViewTree {
-			if m.TreeCursor < len(m.FlatTree)-1 {
-				m.TreeCursor++
-				m.refreshTreePreview()
-			}
-			return m, nil
-		}
-		if m.Cursor < len(m.Filtered)-1 {
-			m.Cursor++
-			m.RefreshPreview()
-		}
-	case "k", "up":
-		if m.ViewMode == ViewTree {
-			if m.TreeCursor > 0 {
-				m.TreeCursor--
-				m.refreshTreePreview()
-			}
-			return m, nil
-		}
-		if m.Cursor > 0 {
-			m.Cursor--
-			m.RefreshPreview()
-		}
-	case "h":
-		if m.ViewMode == ViewTree {
-			// Collapse current dir or go to parent
-			if m.TreeCursor < len(m.FlatTree) {
-				node := m.FlatTree[m.TreeCursor]
-				if node.IsDir && node.Expanded {
-					node.Expanded = false
-					m.FlatTree = FlattenTree(m.Tree)
+	case "h", "left":
+		if m.ViewMode == ViewTree && m.TreeCursor < len(m.FlatTree) {
+			node := m.FlatTree[m.TreeCursor]
+			if node.Expanded && len(node.Children) > 0 {
+				node.Expanded = false
+				m.FlatTree = FlattenTree(m.Tree)
+			} else if node.Parent != nil {
+				for i, n := range m.FlatTree {
+					if n == node.Parent {
+						m.TreeCursor = i
+						break
+					}
 				}
 			}
-			return m, nil
-		}
-	case "g":
-		m.Cursor = 0
-		m.RefreshPreview()
-	case "G":
-		if n := len(m.Filtered); n > 0 {
-			m.Cursor = n - 1
 			m.RefreshPreview()
 		}
+		return m, nil
+	case "j", "down":
+		m.moveCursor(m.cursorPos() + 1)
+	case "k", "up":
+		m.moveCursor(m.cursorPos() - 1)
+	case "g", "home":
+		m.moveCursor(0)
+	case "G", "end":
+		m.moveCursor(1 << 30)
 	case "pgdown":
-		m.Cursor = min(m.Cursor+10, max(len(m.Filtered)-1, 0))
-		m.RefreshPreview()
+		m.moveCursor(m.cursorPos() + 10)
 	case "pgup":
-		m.Cursor = max(m.Cursor-10, 0)
-		m.RefreshPreview()
+		m.moveCursor(m.cursorPos() - 10)
 	}
 	return m, nil
+}
+
+// selectInTree moves the tree cursor to s, expanding its directory.
+func (m *Model) selectInTree(s *session.Session) {
+	if s == nil {
+		return
+	}
+	for _, dir := range m.Tree {
+		for _, row := range dir.Children {
+			if row.Session != nil && row.Session.SessionID == s.SessionID && row.Session.Cwd == s.Cwd {
+				dir.Expanded = true
+				m.FlatTree = FlattenTree(m.Tree)
+				for i, n := range m.FlatTree {
+					if n == row {
+						m.TreeCursor = i
+						return
+					}
+				}
+			}
+		}
+	}
 }
 
 func (m Model) handlePreviewKey(key string, msg tea.KeyMsg) (tea.Model, tea.Cmd) {
@@ -482,7 +602,6 @@ func (m Model) handlePreviewKey(key string, msg tea.KeyMsg) (tea.Model, tea.Cmd)
 		m.RefreshPreview()
 		return m, nil
 	case "esc", "h", "q":
-		// Back to list
 		m.Focus = FocusList
 		return m, nil
 	case "j", "down":
@@ -526,21 +645,4 @@ func defaultViewMode() ViewMode {
 		return ViewTree
 	}
 	return ViewList
-}
-
-func (m *Model) refreshTreePreview() {
-	if m.TreeCursor >= len(m.FlatTree) {
-		return
-	}
-	node := m.FlatTree[m.TreeCursor]
-	if node.Session != nil {
-		// Find session in Filtered and set cursor
-		for i, s := range m.Filtered {
-			if s.SessionID == node.Session.SessionID {
-				m.Cursor = i
-				m.RefreshPreview()
-				return
-			}
-		}
-	}
 }
