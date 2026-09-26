@@ -55,6 +55,9 @@ Reads from (all read-only):
 - `~/.kiro/sessions/cli/` — JSONL sessions (new TUI mode)
 - `~/.local/share/kiro-cli/data.sqlite3` — SQLite sessions (Linux, --classic / --legacy-ui)
 - `~/Library/Application Support/kiro-cli/data.sqlite3` — SQLite sessions (macOS)
+- `%USERPROFILE%\.kiro\sessions\cli\` and `%LOCALAPPDATA%\kiro-cli\data.sqlite3` — Windows
+
+`KIRO_HOME` and `XDG_DATA_HOME` are respected if set.
 
 ## Install
 
@@ -64,7 +67,24 @@ Reads from (all read-only):
 curl -sL https://raw.githubusercontent.com/Paresh-Maheshwari/kiro-cli-history/main/get.sh | bash
 ```
 
-Auto-detects your OS (Linux/macOS) and architecture (amd64/arm64), downloads the latest release binary to `~/.local/bin/`.
+Auto-detects your OS (Linux/macOS) and architecture (amd64/arm64), verifies the SHA-256 checksum, and installs to `~/.local/bin/` (override with `INSTALL_DIR=...`).
+
+### Windows (PowerShell)
+
+```powershell
+irm https://raw.githubusercontent.com/Paresh-Maheshwari/kiro-cli-history/main/install.ps1 | iex
+```
+
+Detects amd64/arm64, verifies the SHA-256 checksum, installs to `%LOCALAPPDATA%\Programs\kiro-cli-history`, and adds it to your user `PATH`. From a cmd prompt or Explorer you can run `install.cmd` from the repo instead.
+
+### Updating
+
+```bash
+kiro-cli-history update          # download and install the latest release
+kiro-cli-history update --check  # only check
+```
+
+The update downloads the binary for your platform from GitHub Releases, verifies it against the release's `checksums.txt`, checks that it runs, then replaces the current binary. If you installed to a system directory (e.g. `/usr/local/bin`), run it with the same permissions (`sudo`). Set `GITHUB_TOKEN` if you hit the API rate limit.
 
 ### From source (requires Go 1.24+ and a C compiler for SQLite)
 
@@ -158,9 +178,17 @@ Kiro CLI stores conversations in multiple formats:
 
 `kiro-cli-history` reads all formats and presents them in a unified view.
 
-## Platform
+## Platforms
 
-Linux and macOS. Uses `xclip`/`xsel`/`wl-copy` (Linux) or `pbcopy` (macOS) for clipboard.
+Prebuilt binaries for every release:
+
+| OS | amd64 | arm64 |
+|----|-------|-------|
+| Linux (glibc 2.35+) | ✓ | ✓ |
+| macOS | ✓ (Intel) | ✓ (Apple Silicon) |
+| Windows | ✓ | ✓ (classic-mode SQLite chats not supported) |
+
+Clipboard uses `wl-copy`/`xclip`/`xsel` on Linux, `pbcopy` on macOS, and the native clipboard on Windows.
 
 ## License
 

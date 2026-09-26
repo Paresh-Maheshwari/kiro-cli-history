@@ -3,7 +3,8 @@ package session
 import (
 	"database/sql"
 	"encoding/json"
-	"fmt"
+	"net/url"
+	"os"
 	"path/filepath"
 	"time"
 
@@ -20,7 +21,10 @@ func openDB() *sql.DB {
 	if dbPath == "" {
 		return nil
 	}
-	conn, err := sql.Open("sqlite3", fmt.Sprintf("file:%s?mode=ro", dbPath))
+	if _, err := os.Stat(dbPath); err != nil {
+		return nil // classic mode never used; don't let SQLite create a file
+	}
+	conn, err := sql.Open("sqlite3", sqliteURI(dbPath))
 	if err != nil {
 		return nil
 	}
@@ -30,6 +34,17 @@ func openDB() *sql.DB {
 	}
 	sqliteDB = conn
 	return sqliteDB
+}
+
+// sqliteURI returns a read-only SQLite URI for path. It works for paths with
+// spaces (macOS "Application Support") and Windows drive letters.
+func sqliteURI(path string) string {
+	p := filepath.ToSlash(path)
+	if len(p) > 0 && p[0] != '/' {
+		p = "/" + p // C:/x -> /C:/x, as SQLite expects
+	}
+	u := url.URL{Scheme: "file", Path: p, RawQuery: "mode=ro"}
+	return u.String()
 }
 
 // CloseDB closes the shared SQLite connection.

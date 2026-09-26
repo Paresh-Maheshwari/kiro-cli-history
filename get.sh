@@ -1,57 +1,70 @@
 #!/bin/bash
-set -e
+# Install the latest kiro-cli-history release binary (Linux / macOS).
+set -euo pipefail
 
 REPO="Paresh-Maheshwari/kiro-cli-history"
 BIN_NAME="kiro-cli-history"
-INSTALL_DIR="$HOME/.local/bin"
+INSTALL_DIR="${INSTALL_DIR:-$HOME/.local/bin}"
 
-# Detect OS and arch
 OS=$(uname -s | tr '[:upper:]' '[:lower:]')
 ARCH=$(uname -m)
-
 case "$ARCH" in
-    x86_64)  ARCH="amd64" ;;
+    x86_64|amd64)  ARCH="amd64" ;;
     aarch64|arm64) ARCH="arm64" ;;
     *) echo "Unsupported architecture: $ARCH"; exit 1 ;;
 esac
-
 case "$OS" in
     linux|darwin) ;;
+    mingw*|msys*|cygwin*)
+        echo "On Windows, download ${BIN_NAME}-windows-${ARCH}.exe from"
+        echo "https://github.com/${REPO}/releases/latest"
+        exit 1 ;;
     *) echo "Unsupported OS: $OS"; exit 1 ;;
 esac
 
 ASSET="${BIN_NAME}-${OS}-${ARCH}"
+BASE="https://github.com/${REPO}/releases/latest/download"
 echo "Detected: ${OS}/${ARCH}"
 
-# Get latest release download URL
-DOWNLOAD_URL=$(curl -sL "https://api.github.com/repos/${REPO}/releases/latest" \
-    | grep "browser_download_url.*${ASSET}" \
-    | head -1 \
-    | cut -d '"' -f 4)
+TMP=$(mktemp -d)
+trap 'rm -rf "$TMP"' EXIT
 
-if [ -z "$DOWNLOAD_URL" ]; then
-    echo "Error: No release found for ${ASSET}"
-    echo "Available at: https://github.com/${REPO}/releases"
+echo "Downloading ${ASSET}..."
+if ! curl -fsSL "${BASE}/${ASSET}" -o "${TMP}/${ASSET}"; then
+    echo "Error: no release found for ${ASSET}"
+    echo "See: https://github.com/${REPO}/releases"
     exit 1
 fi
 
-echo "Downloading ${ASSET}..."
-mkdir -p "$INSTALL_DIR"
-curl -sL "$DOWNLOAD_URL" -o "${INSTALL_DIR}/${BIN_NAME}"
-chmod +x "${INSTALL_DIR}/${BIN_NAME}"
+if curl -fsSL "${BASE}/checksums.txt" -o "${TMP}/checksums.txt"; then
+    want=$(awk -v f="$ASSET" '$2 == f || $2 == "*" f {print $1}' "${TMP}/checksums.txt")
+    if command -v sha256sum >/dev/null; then
+        got=$(sha256sum "${TMP}/${ASSET}" | awk '{print $1}')
+    else
+        got=$(shasum -a 256 "${TMP}/${ASSET}" | awk '{print $1}')
+    fi
+    if [ -z "$want" ] || [ "$want" != "$got" ]; then
+        echo "Error: checksum verification failed for ${ASSET}"
+        exit 1
+    fi
+    echo "Checksum verified."
+else
+    echo "Warning: release has no checksums.txt; skipping verification."
+fi
 
+mkdir -p "$INSTALL_DIR"
+chmod +x "${TMP}/${ASSET}"
+mv -f "${TMP}/${ASSET}" "${INSTALL_DIR}/${BIN_NAME}"
 echo "Installed to ${INSTALL_DIR}/${BIN_NAME}"
 echo ""
 
-# Verify
 "${INSTALL_DIR}/${BIN_NAME}" --version 2>/dev/null || true
 
-# Check PATH
 if [[ ":$PATH:" != *":$INSTALL_DIR:"* ]]; then
     echo ""
     echo "Add to your PATH:"
-    echo "  export PATH=\"\$HOME/.local/bin:\$PATH\""
+    echo "  export PATH=\"$INSTALL_DIR:\$PATH\""
 fi
 
 echo ""
-echo "Run: ${BIN_NAME}"
+echo "Run: ${BIN_NAME}    Update later: ${BIN_NAME} update"

@@ -1,13 +1,16 @@
 package ui
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 
+	"github.com/atotto/clipboard"
 	tea "github.com/charmbracelet/bubbletea"
 
 	"kiro-cli-history/internal/session"
@@ -49,7 +52,19 @@ func (m *Model) DoCopy() {
 		fmt.Fprintf(&sb, "%s:\n%s\n\n", label, msg.Text)
 	}
 
-	for _, name := range []string{"pbcopy", "xclip", "xsel", "wl-copy"} {
+	if err := copyText(sb.String()); err == nil {
+		m.SetNote(fmt.Sprintf("Copied %d messages", len(msgs)))
+	} else {
+		m.SetNote("No clipboard tool found")
+	}
+}
+
+// copyText puts text on the system clipboard.
+func copyText(text string) error {
+	if runtime.GOOS == "windows" {
+		return clipboard.WriteAll(text) // native Win32 clipboard API
+	}
+	for _, name := range []string{"pbcopy", "wl-copy", "xclip", "xsel"} {
 		bin, err := exec.LookPath(name)
 		if err != nil {
 			continue
@@ -63,13 +78,12 @@ func (m *Model) DoCopy() {
 		default:
 			c = exec.Command(bin)
 		}
-		c.Stdin = strings.NewReader(sb.String())
+		c.Stdin = strings.NewReader(text)
 		if c.Run() == nil {
-			m.SetNote(fmt.Sprintf("Copied %d messages", len(msgs)))
-			return
+			return nil
 		}
 	}
-	m.SetNote("No clipboard tool found")
+	return errors.New("no clipboard tool found")
 }
 
 // DoExport saves the current session as a markdown file.
@@ -104,8 +118,16 @@ func (m *Model) DoExport() {
 	}
 
 	// Save to ~/kiro-exports/
-	dir := filepath.Join(os.Getenv("HOME"), "kiro-exports")
-	os.MkdirAll(dir, 0755)
+	home, err := os.UserHomeDir()
+	if err != nil {
+		m.SetNote(fmt.Sprintf("Export failed: %v", err))
+		return
+	}
+	dir := filepath.Join(home, "kiro-exports")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		m.SetNote(fmt.Sprintf("Export failed: %v", err))
+		return
+	}
 
 	// Filename from title (sanitized)
 	name := sanitizeFilename(s.Title)

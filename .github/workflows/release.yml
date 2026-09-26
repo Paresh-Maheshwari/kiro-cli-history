@@ -6,80 +6,153 @@ on:
       - 'v*'
 
 permissions:
-  contents: write
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
-  build-linux:
+  check:
+    name: Check tag matches source version
     runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        include:
-          - goarch: amd64
-            cc: gcc
-          - goarch: arm64
-            cc: aarch64-linux-gnu-gcc
-            packages: gcc-aarch64-linux-gnu
-
+    outputs:
+      version: ${{ steps.v.outputs.version }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
-        with:
-          go-version-file: go.mod
+      - uses: actions/checkout@v7
 
-      - name: Install cross-compiler
-        if: matrix.packages
-        run: sudo apt-get update && sudo apt-get install -y ${{ matrix.packages }}
-
-      - name: Build
+      - id: v
+        name: Compare tag with main.go
         env:
-          GOOS: linux
-          GOARCH: ${{ matrix.goarch }}
-          CGO_ENABLED: 1
-          CC: ${{ matrix.cc }}
-        run: go build -ldflags="-s -w" -o kiro-cli-history-linux-${{ matrix.goarch }} .
+          TAG: ${{ github.ref_name }}
+        run: |
+          src=$(sed -n 's/^var version = "\(.*\)"$/\1/p' main.go)
+          if [ "${TAG#v}" != "$src" ]; then
+            echo "::error file=main.go::Tag $TAG does not match version \"$src\" in main.go"
+            exit 1
+          fi
+          echo "version=$src" >> "$GITHUB_OUTPUT"
 
-      - uses: actions/upload-artifact@v4
-        with:
-          name: kiro-cli-history-linux-${{ matrix.goarch }}
-          path: kiro-cli-history-linux-${{ matrix.goarch }}
-
-  build-macos:
+  build:
+    name: Build ${{ matrix.goos }}/${{ matrix.goarch }}
+    needs: check
     strategy:
+      fail-fast: false
       matrix:
         include:
-          - runner: macos-latest
-            goarch: amd64
-          - runner: macos-14
-            goarch: arm64
-
+          # Linux builds use Ubuntu 22.04 so the binaries also run on distros
+          # with an older glibc (2.35+).
+          - { goos: linux,   goarch: amd64, runner: ubuntu-22.04,     cgo: '1' }
+          - { goos: linux,   goarch: arm64, runner: ubuntu-22.04-arm, cgo: '1' }
+          - { goos: darwin,  goarch: amd64, runner: macos-15-intel,   cgo: '1' }
+          - { goos: darwin,  goarch: arm64, runner: macos-15,         cgo: '1' }
+          - { goos: windows, goarch: amd64, runner: windows-2025,     cgo: '1' }
+          # No arm64 MinGW toolchain on the runner: built without cgo, so
+          # classic-mode (SQLite) chats are unavailable on Windows on ARM.
+          - { goos: windows, goarch: arm64, runner: windows-11-arm,   cgo: '0' }
     runs-on: ${{ matrix.runner }}
+    defaults:
+      run:
+        shell: bash
+    env:
+      VERSION: ${{ needs.check.outputs.version }}
+      ASSET: kiro-cli-history-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.goos == 'windows' && '.exe' || '' }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
 
+      - name: Test
+        run: go test ./...
+        env:
+          CGO_ENABLED: ${{ matrix.cgo }}
+
       - name: Build
         env:
-          CGO_ENABLED: 1
-        run: go build -ldflags="-s -w" -o kiro-cli-history-darwin-${{ matrix.goarch }} .
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: ${{ matrix.cgo }}
+        run: |
+          go build -trimpath -ldflags="-s -w -X main.version=${VERSION}" -o "$ASSET" .
 
-      - uses: actions/upload-artifact@v4
+      - name: Smoke test
+        run: |
+          out=$("./$ASSET" --version | head -1)
+          echo "$out"
+          [ "$out" = "kiro-cli-history ${VERSION}" ] || { echo "::error::unexpected version output"; exit 1; }
+          "./$ASSET" --help > /dev/null
+
+      - uses: actions/upload-artifact@v7
         with:
-          name: kiro-cli-history-darwin-${{ matrix.goarch }}
-          path: kiro-cli-history-darwin-${{ matrix.goarch }}
+          name: ${{ env.ASSET }}
+          path: ${{ env.ASSET }}
+          if-no-files-found: error
 
   release:
-    needs: [build-linux, build-macos]
+    name: Publish release
+    needs: [check, build]
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           path: dist
           merge-multiple: true
 
-      - name: Create release
-        uses: softprops/action-gh-release@v2
+      - name: Checksums
+        working-directory: dist
+        run: |
+          [ "$(ls | wc -l)" -eq 6 ] || { echo "::error::expected 6 binaries"; ls; exit 1; }
+          sha256sum kiro-cli-history-* > checksums.txt
+          cat checksums.txt
+
+      - uses: softprops/action-gh-release@v3
         with:
           files: dist/*
+          fail_on_unmatched_files: true
           generate_release_notes: true
+          prerelease: ${{ contains(github.ref_name, '-') }}
+
+  verify-install:
+    name: Verify installer (${{ matrix.os }})
+    needs: [check, release]
+    # "latest" download URLs skip pre-releases, so only check full releases.
+    if: ${{ !contains(github.ref_name, '-') }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: get.sh
+        if: runner.os != 'Windows'
+        shell: bash
+        env:
+          INSTALL_DIR: ${{ runner.temp }}/bin
+        run: |
+          bash get.sh
+          "$INSTALL_DIR/kiro-cli-history" --version | grep -qx "kiro-cli-history ${{ needs.check.outputs.version }}"
+
+      - name: install.ps1 (PowerShell 7)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          KIRO_CLI_HISTORY_INSTALL_DIR: ${{ runner.temp }}\bin7
+        run: |
+          ./install.ps1
+          $v = & "$env:KIRO_CLI_HISTORY_INSTALL_DIR\kiro-cli-history.exe" --version | Select-Object -First 1
+          if ($v -ne 'kiro-cli-history ${{ needs.check.outputs.version }}') { throw "got '$v'" }
+
+      - name: install.cmd (Windows PowerShell 5.1)
+        if: runner.os == 'Windows'
+        shell: cmd
+        env:
+          KIRO_CLI_HISTORY_INSTALL_DIR: ${{ runner.temp }}\bin5
+        run: |
+          call install.cmd /nopause || exit /b 1
+          "%KIRO_CLI_HISTORY_INSTALL_DIR%\kiro-cli-history.exe" --version

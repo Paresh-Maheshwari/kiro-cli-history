@@ -6,17 +6,33 @@ on:
   pull_request:
     branches: [main]
 
-jobs:
-  lint-and-build:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
+permissions:
+  contents: read
 
-      - uses: actions/setup-go@v5
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Test (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
 
       - name: Check formatting
+        if: runner.os == 'Linux'
         run: |
           if [ -n "$(gofmt -l .)" ]; then
             echo "Files not formatted:"
@@ -31,9 +47,18 @@ jobs:
         run: go test -race ./...
 
       - name: Build
-        run: go build -o kiro-cli-history .
+        run: go build -o kiro-cli-history${{ runner.os == 'Windows' && '.exe' || '' }} .
 
       - name: Verify binary
         run: |
           ./kiro-cli-history --version
           ./kiro-cli-history --help | head -1
+
+      - name: Check install.ps1 syntax
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $errors = $null
+          [System.Management.Automation.Language.Parser]::ParseFile("$PWD/install.ps1", [ref]$null, [ref]$errors) | Out-Null
+          if ($errors) { $errors | ForEach-Object { Write-Error $_.ToString() }; exit 1 }
+          powershell -NoProfile -Command "`$e=`$null; [void][System.Management.Automation.Language.Parser]::ParseFile('$PWD\install.ps1',[ref]`$null,[ref]`$e); if (`$e) { `$e; exit 1 }"
