@@ -8,9 +8,21 @@ import (
 	"sync"
 )
 
+// LoadFilter narrows which sessions LoadAll returns.
+type LoadFilter struct {
+	Cwd string // if set, keep only sessions whose directory equals this path
+}
+
 // LoadAll loads all sessions, deduplicates, sorts newest first, links
 // rewind/subagent relationships and builds a quick index (title + cwd).
 func LoadAll() []Session {
+	return LoadAllFiltered(LoadFilter{})
+}
+
+// LoadAllFiltered is LoadAll with an optional filter. Filtering happens before
+// full-text indexing, so a directory filter also makes startup much faster:
+// only the matching sessions' message files are read.
+func LoadAllFiltered(f LoadFilter) []Session {
 	out := LoadJSONL()
 
 	var sqlite []Session
@@ -31,6 +43,17 @@ func LoadAll() []Session {
 		}
 	}
 
+	if f.Cwd != "" {
+		want := normPath(f.Cwd)
+		kept := out[:0]
+		for _, s := range out {
+			if normPath(s.Cwd) == want {
+				kept = append(kept, s)
+			}
+		}
+		out = kept
+	}
+
 	sort.SliceStable(out, func(i, j int) bool {
 		return sortKey(&out[i]) > sortKey(&out[j])
 	})
@@ -39,6 +62,14 @@ func LoadAll() []Session {
 		out[i].SearchText = baseSearchText(&out[i])
 	}
 	return out
+}
+
+// normPath makes directory comparison tolerant of a trailing separator.
+func normPath(p string) string {
+	if len(p) > 1 {
+		p = strings.TrimRight(p, `/\`)
+	}
+	return p
 }
 
 func sortKey(s *Session) string {

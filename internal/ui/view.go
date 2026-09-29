@@ -154,6 +154,9 @@ func (m Model) View() string {
 	hint := func(k, d string) string { return hintKey.Render(k) + hintDesc.Render(d) }
 
 	count := fmt.Sprintf(" %d/%d", len(m.Filtered), m.TotalRows)
+	if Filter.Cwd != "" {
+		count += CyanStyle.Render(" here")
+	}
 	if m.Indexing {
 		count += " ⟳"
 	}

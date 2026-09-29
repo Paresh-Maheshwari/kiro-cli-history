@@ -18,6 +18,10 @@ import (
 // Version is shown on the splash screen; set by main.
 var Version = "dev"
 
+// Filter narrows which sessions the browser loads (e.g. only the current
+// directory). The zero value loads everything.
+var Filter session.LoadFilter
+
 type sessionsLoadedMsg struct{ Sessions []session.Session }
 type debounceMsg struct{ Query string }
 type indexDoneMsg struct{ Results []session.IndexResult }
@@ -93,7 +97,7 @@ func NewModel() Model {
 
 func (m Model) Init() tea.Cmd {
 	return tea.Batch(textinput.Blink, m.Spinner.Tick, func() tea.Msg {
-		return sessionsLoadedMsg{session.LoadAll()}
+		return sessionsLoadedMsg{session.LoadAllFiltered(Filter)}
 	})
 }
 

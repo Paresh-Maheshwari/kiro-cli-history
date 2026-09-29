@@ -97,10 +97,12 @@ bash install.sh
 ## Usage
 
 ```bash
-kiro-cli-history
+kiro-cli-history            # all sessions, everywhere
+kiro-cli-history --here     # only sessions from the current directory
+kiro-cli-history --cwd DIR  # only sessions from DIR
 ```
 
-Run from anywhere. It searches globally.
+Run from anywhere. By default it searches globally. `--here` limits the browser to conversations started in the current directory, which also opens much faster because only those chats are indexed.
 
 ### Keyboard shortcuts
 

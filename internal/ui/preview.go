@@ -77,6 +77,8 @@ func (m *Model) RefreshPreview() {
 	if s == nil {
 		if m.ViewMode == ViewTree && m.TreeCursor < len(m.FlatTree) && m.FlatTree[m.TreeCursor].IsDir {
 			m.Preview.SetContent(renderDirPreview(m.FlatTree[m.TreeCursor], m.RightW()))
+		} else if len(m.All) == 0 && Filter.Cwd != "" {
+			m.Preview.SetContent("No sessions found in this directory:\n  " + Filter.Cwd + "\n\nRun without --here to browse all sessions.")
 		} else {
 			m.Preview.SetContent("No sessions found.")
 		}

@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"path/filepath"
 
 	tea "github.com/charmbracelet/bubbletea"
 
@@ -16,16 +17,20 @@ import (
 
 // version is the release version. Release builds set it with
 // -ldflags "-X main.version=<tag without v>"; keep it in sync for source builds.
-var version = "1.3.0"
+var version = "1.4.0"
 
 const usage = `kiro-cli-history — Search & browse Kiro CLI conversations
 
 Usage:
-  kiro-cli-history                 Open the session browser
+  kiro-cli-history                 Open the session browser (all directories)
+  kiro-cli-history --here          Only sessions from the current directory
+  kiro-cli-history --cwd DIR       Only sessions from DIR
   kiro-cli-history update          Update to the latest release
   kiro-cli-history update --check  Only check whether an update is available
 
 Flags:
+  --here           Show only sessions started in the current directory (fast)
+  --cwd DIR        Show only sessions started in DIR
   --help, -h       Show this help
   --version, -v    Show version
 
@@ -50,7 +55,15 @@ func main() {
 	update.CleanupOld()
 
 	if len(os.Args) > 1 {
-		os.Exit(runCommand(os.Args[1:]))
+		// update/help/version are commands; anything else is a browser flag.
+		switch os.Args[1] {
+		case "update", "--help", "-h", "help", "--version", "-v", "version":
+			os.Exit(runCommand(os.Args[1:]))
+		}
+	}
+
+	if code, ok := parseBrowserFlags(os.Args[1:]); !ok {
+		os.Exit(code)
 	}
 
 	ui.Version = version
@@ -69,6 +82,38 @@ func main() {
 		return
 	}
 	os.Exit(resume(m.ResumeResult))
+}
+
+// parseBrowserFlags sets ui.Filter from the browser flags. It returns ok=false
+// with an exit code when the program should stop (bad flag, or --cwd resolved).
+func parseBrowserFlags(args []string) (int, bool) {
+	for i := 0; i < len(args); i++ {
+		switch args[i] {
+		case "--here", "-H":
+			cwd, err := os.Getwd()
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "cannot determine current directory: %v\n", err)
+				return 1, false
+			}
+			ui.Filter.Cwd = cwd
+		case "--cwd":
+			if i+1 >= len(args) {
+				fmt.Fprintf(os.Stderr, "--cwd needs a directory\n")
+				return 2, false
+			}
+			i++
+			abs, err := filepath.Abs(args[i])
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "invalid --cwd path: %v\n", err)
+				return 2, false
+			}
+			ui.Filter.Cwd = abs
+		default:
+			fmt.Fprintf(os.Stderr, "Unknown flag: %s\nRun with --help for usage.\n", args[i])
+			return 2, false
+		}
+	}
+	return 0, true
 }
 
 // runCommand handles non-interactive commands and returns the exit code.
