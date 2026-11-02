@@ -1,6 +1,14 @@
 # Changelog
 
-## 1.5.0
+## 1.5.1
+
+- Include the V3 support, V2 compatibility, workspace grouping, and reliability improvements listed below.
+- Fix the Windows command installer when launched from PowerShell 7: reset the child module path so Windows PowerShell can load its own checksum commands.
+- Exercise both PowerShell and command installers in regular Windows CI, including checksum rejection and failed-update recovery.
+
+## 1.5.0 (not published)
+
+Publication was blocked by the Windows installer check; these changes are included in 1.5.1.
 
 - Support Kiro's V3 session metadata and message envelopes alongside legacy JSONL and SQLite.
 - Group conversations by workspace and nest workflow/subagent sessions, including rewound subagents. Deduplicate migrated histories and preserve search/expansion behavior.

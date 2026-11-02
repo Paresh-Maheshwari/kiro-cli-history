@@ -18,7 +18,7 @@ import (
 
 // version is the release version. Release builds set it with
 // -ldflags "-X main.version=<tag without v>"; keep it in sync for source builds.
-var version = "1.5.0"
+var version = "1.5.1"
 
 const usage = `kiro-cli-history — Search & browse Kiro CLI conversations
 

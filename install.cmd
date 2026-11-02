@@ -2,6 +2,8 @@
 rem Install kiro-cli-history on Windows (double-click or run from cmd).
 rem Uses install.ps1 next to this file if present, otherwise the latest from GitHub.
 setlocal
+rem Windows PowerShell must rebuild its module path when called from PowerShell 7.
+set "PSModulePath="
 set "PS1=%~dp0install.ps1"
 if exist "%PS1%" (
     powershell -NoProfile -ExecutionPolicy Bypass -File "%PS1%"

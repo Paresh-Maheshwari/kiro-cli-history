@@ -66,3 +66,18 @@ jobs:
           [System.Management.Automation.Language.Parser]::ParseFile("$PWD/install.ps1", [ref]$null, [ref]$errors) | Out-Null
           if ($errors) { $errors | ForEach-Object { Write-Error $_.ToString() }; exit 1 }
           powershell -NoProfile -Command "`$e=`$null; [void][System.Management.Automation.Language.Parser]::ParseFile('$PWD\install.ps1',[ref]`$null,[ref]`$e); if (`$e) { `$e; exit 1 }"
+
+      - name: Verify Windows installers
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $releaseDir = Join-Path $env:RUNNER_TEMP 'installer-release'
+          New-Item -ItemType Directory -Force -Path $releaseDir | Out-Null
+          $arch = (& go env GOARCH).Trim()
+          $asset = "kiro-cli-history-windows-$arch.exe"
+          $binary = Join-Path $releaseDir $asset
+          Copy-Item ./kiro-cli-history.exe $binary
+          $version = (& ./kiro-cli-history.exe --version | Select-Object -First 1) -replace '^kiro-cli-history ', ''
+          $hash = (Get-FileHash -Algorithm SHA256 $binary).Hash.ToLowerInvariant()
+          Set-Content -Path (Join-Path $releaseDir 'checksums.txt') -Value "$hash  $asset" -Encoding ascii
+          ./scripts/test-install.ps1 -ReleaseDir $releaseDir -Version $version

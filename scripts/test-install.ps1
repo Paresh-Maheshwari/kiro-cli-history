@@ -11,6 +11,7 @@ $oldInstall = $env:KIRO_CLI_HISTORY_INSTALL_DIR
 $oldPath = $env:Path
 $oldUserPath = [Environment]::GetEnvironmentVariable('Path', 'User')
 $installer = Join-Path $PSScriptRoot '..\install.ps1'
+$wrapper = Join-Path $PSScriptRoot '..\install.cmd'
 $install = Join-Path $root 'installed'
 $target = Join-Path $install 'kiro-cli-history.exe'
 
@@ -27,6 +28,14 @@ try {
     $env:KIRO_CLI_HISTORY_INSTALL_DIR = $install
     & $installer
     $expected = (Get-FileHash -Algorithm SHA256 $target).Hash
+
+    # Keep the cmd.exe intermediary: it inherits PowerShell 7's module path,
+    # which must not leak into the Windows PowerShell started by install.cmd.
+    & $env:ComSpec /d /c "call `"$wrapper`" /nopause"
+    if ($LASTEXITCODE -ne 0) { throw 'Command installer failed' }
+    if ((Get-FileHash -Algorithm SHA256 $target).Hash -ne $expected) {
+        throw 'Command installer installed a different binary'
+    }
 
     # A failed checksum must leave the already installed binary unchanged.
     $bad = Join-Path $root 'bad-release'
@@ -57,7 +66,7 @@ try {
     if (Get-ChildItem $install -Filter '.kiro-cli-history-*.exe') {
         throw 'Installer left a staged binary'
     }
-    Write-Host 'Windows installer success, checksum rejection, and rollback checks passed.'
+    Write-Host 'PowerShell and command installer success, checksum rejection, and rollback checks passed.'
 } finally {
     Remove-Item Function:\Move-Item -ErrorAction SilentlyContinue
     $env:KIRO_CLI_HISTORY_RELEASE_DIR = $oldDir
