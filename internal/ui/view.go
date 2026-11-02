@@ -7,6 +7,8 @@ import (
 	"time"
 
 	"github.com/charmbracelet/lipgloss"
+
+	"kiro-cli-history/internal/terminaltext"
 )
 
 var (
@@ -15,8 +17,15 @@ var (
 )
 
 func (m Model) View() string {
+	return terminaltext.Styled(m.view())
+}
+
+func (m Model) view() string {
 	if m.W == 0 || m.Loading {
 		return RenderSplash(m.W, m.H, m.Spinner.View())
+	}
+	if m.W < 60 || m.H < 12 {
+		return smallTerminal(m.W, m.H)
 	}
 
 	if m.ShowHelp {
@@ -24,7 +33,13 @@ func (m Model) View() string {
 	}
 
 	if m.ShowSettings {
-		return fillScreen(RenderSettings(m.W, m.H, 0), m.W, m.H)
+		screen := fillScreen(RenderSettings(m.W, m.H, 0), m.W, m.H)
+		if m.Note != "" && time.Now().Before(m.NoteExpiry) {
+			lines := strings.Split(screen, "\n")
+			lines[len(lines)-1] = StatusStyle.Width(m.W).Render(fit(" "+m.Note, m.W))
+			screen = strings.Join(lines, "\n")
+		}
+		return screen
 	}
 
 	// Fullscreen preview mode — no sidebar
@@ -41,7 +56,7 @@ func (m Model) View() string {
 		if m.Note != "" && time.Now().Before(m.NoteExpiry) {
 			st = " " + m.Note
 		}
-		status := StatusStyle.Width(m.W).Render(st)
+		status := StatusStyle.Width(m.W).Render(fit(st, m.W))
 		return body + "\n" + status
 	}
 
@@ -84,12 +99,12 @@ func (m Model) View() string {
 		}
 		for i := start; i < len(m.Filtered) && len(lines) < lh; i++ {
 			s := &m.Filtered[i]
-			title := s.Title
+			title := terminaltext.Line(s.Title)
 			if s.IsSubagent() {
 				title = "⑂ " + title
 			}
 			title = fit(title, lw-2)
-			cwd := filepath.Base(s.Cwd)
+			cwd := terminaltext.Line(filepath.Base(s.Cwd))
 			date := FmtDate(s.UpdatedAt)
 			msgs := fmt.Sprintf("%d msgs", s.MsgCount)
 			if m.Indexing && s.MsgCount == 0 {
@@ -160,8 +175,11 @@ func (m Model) View() string {
 	if m.Indexing {
 		count += " ⟳"
 	}
+	if m.IndexLimited > 0 {
+		count += fmt.Sprintf(" [%d search-limited]", m.IndexLimited)
+	}
 	if q := m.Input.Value(); q != "" {
-		count += DimStyle.Render(fmt.Sprintf(" '%s'", q))
+		count += DimStyle.Render(fmt.Sprintf(" '%s'", terminaltext.Line(q)))
 	}
 
 	var mode, hints string
@@ -185,19 +203,30 @@ func (m Model) View() string {
 	if m.Note != "" && time.Now().Before(m.NoteExpiry) {
 		st = " " + m.Note
 	}
-	status := StatusStyle.Width(m.W).Render(st)
+	status := StatusStyle.Width(m.W).Render(fit(st, m.W))
 
 	return body + "\n" + status
 }
 
 func FmtDate(s string) string {
 	if len(s) < 10 {
-		return s
+		return terminaltext.Line(s)
 	}
 	if t, err := time.Parse("2006-01-02", s[:10]); err == nil {
 		return t.Format("2 Jan 2006")
 	}
-	return s[:10]
+	return terminaltext.Line(s[:10])
+}
+
+func smallTerminal(w, h int) string {
+	if w < 1 || h < 1 {
+		return ""
+	}
+	lines := []string{"Terminal too small", "Resize to 60 × 12", "Ctrl+C to quit"}
+	for i := range lines {
+		lines[i] = fit(lines[i], w)
+	}
+	return fillScreen(strings.Join(lines, "\n"), w, h)
 }
 
 func FmtDur(m int) string {
@@ -209,6 +238,9 @@ func FmtDur(m int) string {
 
 // fillScreen pads or trims content to exactly h lines of width w.
 func fillScreen(content string, w, h int) string {
+	if w < 1 || h < 1 {
+		return ""
+	}
 	lines := strings.Split(content, "\n")
 	blank := strings.Repeat(" ", w)
 	for len(lines) < h {

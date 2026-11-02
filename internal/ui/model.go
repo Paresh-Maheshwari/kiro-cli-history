@@ -13,6 +13,7 @@ import (
 
 	"kiro-cli-history/internal/search"
 	"kiro-cli-history/internal/session"
+	"kiro-cli-history/internal/terminaltext"
 )
 
 // Version is shown on the splash screen; set by main.
@@ -52,6 +53,8 @@ type Model struct {
 	TreeCursor   int
 	Loading      bool
 	Indexing     bool
+	IndexLimited int
+	ActionBusy   bool
 	ShowHelp     bool
 	HelpScroll   int
 	ShowSettings bool
@@ -61,6 +64,9 @@ type Model struct {
 	NoteExpiry   time.Time
 	PrevCache    map[string]string
 	PrevWidth    int
+
+	treeSearching bool
+	treeExpanded  map[string]bool // manual expansion state, kept across searches
 
 	// Lazy preview: the selected session's full render runs in the background.
 	pendingKey  string
@@ -145,7 +151,7 @@ func (m *Model) current() *session.Session {
 // refilter recomputes visible rows from All using the search query and the
 // grouping settings, then rebuilds the tree and preview.
 func (m *Model) refilter(resetCursor bool) {
-	cfg := session.AppConfig
+	cfg := session.CurrentConfig()
 	cands := search.Sessions(m.Input.Value(), m.All)
 	m.Filtered, m.Children = session.Collapse(cands, cfg.CollapseRewinds, cfg.HideSubagents)
 	if m.Input.Value() == "" {
@@ -166,22 +172,30 @@ func (m *Model) refilter(resetCursor bool) {
 // rebuildTree rebuilds the tree from Filtered, keeping expanded nodes and the
 // selected node when possible.
 func (m *Model) rebuildTree(resetCursor bool) {
-	expanded := make(map[string]bool)
-	for _, n := range FlattenTree(m.Tree) {
-		if n.Expanded {
-			expanded[n.Key()] = true
+	if !m.treeSearching {
+		m.treeExpanded = make(map[string]bool)
+		var remember func([]*TreeNode)
+		remember = func(nodes []*TreeNode) {
+			for _, n := range nodes {
+				if n.Expanded {
+					m.treeExpanded[n.Key()] = true
+				}
+				remember(n.Children)
+			}
 		}
+		remember(m.Tree)
 	}
 	selected := ""
 	if !resetCursor && m.TreeCursor < len(m.FlatTree) {
 		selected = m.FlatTree[m.TreeCursor].Key()
 	}
 
-	m.Tree = BuildTree(m.Filtered, m.Children, m.Input.Value() != "")
+	m.treeSearching = m.Input.Value() != ""
+	m.Tree = buildWorkspaceTree(m.Filtered, m.Children, m.treeSearching, Filter.Cwd)
 	var restore func([]*TreeNode)
 	restore = func(nodes []*TreeNode) {
 		for _, n := range nodes {
-			if expanded[n.Key()] {
+			if !m.treeSearching && m.treeExpanded[n.Key()] {
 				n.Expanded = true
 			}
 			restore(n.Children)
@@ -228,9 +242,15 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Full-text index in the background. It only reads sessions; results
 		// are applied here on the UI goroutine (no shared mutable state).
 		all := m.All
+		cfg := session.CurrentConfig()
 		return m, func() tea.Msg {
-			return indexDoneMsg{session.BuildFullIndex(all)}
+			return indexDoneMsg{session.BuildFullIndexWithConfig(all, cfg)}
 		}
+
+	case actionDoneMsg:
+		m.ActionBusy = false
+		m.SetNote(msg.note)
+		return m, nil
 
 	case indexDoneMsg:
 		session.ApplyIndex(m.All, msg.Results)
@@ -238,6 +258,12 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		total := 0
 		for _, s := range m.All {
 			total += s.MsgCount
+		}
+		m.IndexLimited = 0
+		for _, result := range msg.Results {
+			if result.Limited {
+				m.IndexLimited++
+			}
 		}
 		m.SetNote(fmt.Sprintf("Index ready — %d sessions, %d messages", len(m.All), total))
 		m.PrevCache = make(map[string]string)
@@ -256,8 +282,8 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.Preview.Width = rw
 		m.Preview.Height = m.ListH() + 1
 		if m.Fullscreen {
-			m.Preview.Width = m.W - 2
-			m.Preview.Height = m.H - 2
+			m.Preview.Width = max(1, m.W-2)
+			m.Preview.Height = max(1, m.H-2)
 		}
 		if rw != m.PrevWidth {
 			m.PrevCache = make(map[string]string)
@@ -286,6 +312,13 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	key := msg.String()
+	if key == "ctrl+c" {
+		m.prevGen.Add(1)
+		return m, tea.Quit
+	}
+	if m.W > 0 && (m.W < 60 || m.H < 12) {
+		return m, nil
+	}
 
 	// Help overlay — scrollable
 	if m.ShowHelp {
@@ -307,33 +340,34 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	// Settings overlay
 	if m.ShowSettings {
-		cfg := session.AppConfig
+		cfg := session.CurrentConfig()
 		switch key {
 		case "s", "esc", "enter":
 			m.ShowSettings = false
 		case "1":
 			cfg.SQLiteEnabled = !cfg.SQLiteEnabled
-			session.SaveConfig(cfg)
 		case "2":
 			cfg.SQLiteIndex = !cfg.SQLiteIndex
-			session.SaveConfig(cfg)
 		case "3":
 			if cfg.DefaultView == "tree" {
 				cfg.DefaultView = "list"
 			} else {
 				cfg.DefaultView = "tree"
 			}
-			session.SaveConfig(cfg)
 		case "4":
 			cfg.HideSubagents = !cfg.HideSubagents
-			session.SaveConfig(cfg)
-			m.PrevCache = make(map[string]string)
-			m.refilter(false)
 		case "5":
 			cfg.CollapseRewinds = !cfg.CollapseRewinds
-			session.SaveConfig(cfg)
-			m.PrevCache = make(map[string]string)
-			m.refilter(false)
+		default:
+			return m, nil
+		}
+		if key >= "1" && key <= "5" {
+			if err := session.SaveConfig(cfg); err != nil {
+				m.SetNote(fmt.Sprintf("Could not save settings: %v", err))
+			} else if key == "4" || key == "5" {
+				m.PrevCache = make(map[string]string)
+				m.refilter(false)
+			}
 		}
 		return m, nil
 	}
@@ -379,11 +413,11 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "ctrl+r":
 		return m.DoResume()
 	case "ctrl+y":
-		m.DoCopy()
-		return m, nil
+		cmd := m.DoCopy()
+		return m, cmd
 	case "ctrl+e":
-		m.DoExport()
-		return m, nil
+		cmd := m.DoExport()
+		return m, cmd
 	case "ctrl+f", "/":
 		if m.Focus != FocusSearch {
 			m.Focus = FocusSearch
@@ -499,7 +533,8 @@ func (m Model) handleListKey(key string, msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			// Keep the selected row when it is a top-level row.
 			if s := m.current(); s != nil {
 				for i := range m.Filtered {
-					if m.Filtered[i].SessionID == s.SessionID && m.Filtered[i].Cwd == s.Cwd {
+					row := &m.Filtered[i]
+					if row.SessionID == s.SessionID && (s.SessionID != "" || row.Cwd == s.Cwd) {
 						m.Cursor = i
 						break
 					}
@@ -640,12 +675,12 @@ func (m Model) handlePreviewKey(key string, msg tea.KeyMsg) (tea.Model, tea.Cmd)
 }
 
 func (m *Model) SetNote(s string) {
-	m.Note = s
+	m.Note = terminaltext.Line(s)
 	m.NoteExpiry = time.Now().Add(3 * time.Second)
 }
 
 func defaultViewMode() ViewMode {
-	if session.AppConfig.DefaultView == "tree" {
+	if session.CurrentConfig().DefaultView == "tree" {
 		return ViewTree
 	}
 	return ViewList

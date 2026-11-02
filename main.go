@@ -11,13 +11,14 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 
 	"kiro-cli-history/internal/session"
+	"kiro-cli-history/internal/terminaltext"
 	"kiro-cli-history/internal/ui"
 	"kiro-cli-history/internal/update"
 )
 
 // version is the release version. Release builds set it with
 // -ldflags "-X main.version=<tag without v>"; keep it in sync for source builds.
-var version = "1.4.0"
+var version = "1.5.0"
 
 const usage = `kiro-cli-history — Search & browse Kiro CLI conversations
 
@@ -67,9 +68,12 @@ func main() {
 	}
 
 	ui.Version = version
-	session.LoadConfig()
-
-	p := tea.NewProgram(ui.NewModel(), tea.WithAltScreen())
+	configErr := session.LoadConfig()
+	model := ui.NewModel()
+	if configErr != nil {
+		model.SetNote(fmt.Sprintf("Settings: %v (using defaults)", configErr))
+	}
+	p := tea.NewProgram(model, tea.WithAltScreen())
 	final, err := p.Run()
 	session.CloseDB()
 	if err != nil {
@@ -151,10 +155,14 @@ func runCommand(args []string) int {
 
 // resume starts `kiro-cli chat --resume-id <id>` in the session's directory.
 func resume(s *session.Session) int {
-	fmt.Printf("\nResuming: %s\nDirectory: %s\n\n", s.Title, s.Cwd)
+	if s.SessionID == "" {
+		fmt.Fprintln(os.Stderr, "This legacy conversation has no resumable session ID")
+		return 1
+	}
+	fmt.Printf("\nResuming: %s\nDirectory: %s\n\n", terminaltext.Line(s.Title), terminaltext.Line(s.Cwd))
 
 	if err := os.Chdir(s.Cwd); err != nil {
-		fmt.Fprintf(os.Stderr, "chdir failed: %v\n", err)
+		fmt.Fprintf(os.Stderr, "chdir failed: %s\n", terminaltext.Line(err.Error()))
 		return 1
 	}
 	bin, err := exec.LookPath("kiro-cli")
@@ -162,9 +170,17 @@ func resume(s *session.Session) int {
 		fmt.Fprintf(os.Stderr, "kiro-cli not found in PATH\n")
 		return 1
 	}
-	if err := execReplace(bin, []string{"kiro-cli", "chat", "--resume-id", s.SessionID}); err != nil {
-		fmt.Fprintf(os.Stderr, "starting kiro-cli failed: %v\n", err)
+	if err := execReplace(bin, resumeArgs(s)); err != nil {
+		fmt.Fprintf(os.Stderr, "starting kiro-cli failed: %s\n", terminaltext.Line(err.Error()))
 		return 1
 	}
 	return 0
+}
+
+func resumeArgs(s *session.Session) []string {
+	args := []string{"kiro-cli", "chat"}
+	if s.Source == "jsonl_v3" {
+		args = append(args, "--v3")
+	}
+	return append(args, "--resume-id", s.SessionID)
 }

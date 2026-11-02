@@ -9,6 +9,7 @@ import (
 	"github.com/charmbracelet/x/ansi"
 
 	"kiro-cli-history/internal/session"
+	"kiro-cli-history/internal/terminaltext"
 )
 
 // ViewMode controls left sidebar display.
@@ -44,47 +45,118 @@ func (n *TreeNode) Key() string {
 	return ""
 }
 
-// BuildTree groups rows by cwd; children (from session.Collapse) are nested
-// under their row. autoExpand opens all directories (used while searching).
+// BuildTree groups rows by workspace, keeping child sessions under their
+// parents. autoExpand reveals matching descendants while searching.
 func BuildTree(rows []session.Session, children map[string][]session.Session, autoExpand bool) []*TreeNode {
-	groups := make(map[string][]int)
-	for i := range rows {
-		cwd := rows[i].Cwd
-		if cwd == "" {
-			cwd = "(unknown)"
+	return buildWorkspaceTree(rows, children, autoExpand, "")
+}
+
+func buildWorkspaceTree(rows []session.Session, children map[string][]session.Session, autoExpand bool, cwdFilter string) []*TreeNode {
+	groups := make(map[string][]session.Session)
+	for _, row := range rows {
+		paths := row.Workspaces()
+		if cwdFilter != "" {
+			paths = []string{row.Cwd}
 		}
-		groups[cwd] = append(groups[cwd], i)
+		if len(paths) == 0 || len(paths) == 1 && paths[0] == "" {
+			paths = []string{"(unknown)"}
+		}
+		for _, path := range paths {
+			s := row
+			if path != "(unknown)" {
+				s.Cwd = path
+			}
+			groups[path] = append(groups[path], s)
+		}
 	}
 	dirs := make([]string, 0, len(groups))
+	names := make(map[string]int)
 	for d := range groups {
 		dirs = append(dirs, d)
+		names[filepath.Base(d)]++
 	}
 	sort.Strings(dirs)
 
 	tree := make([]*TreeNode, 0, len(dirs))
 	for _, dir := range dirs {
-		dn := &TreeNode{Name: filepath.Base(dir), Path: dir, IsDir: true, Expanded: autoExpand}
-		for _, i := range groups[dir] {
-			row := &rows[i]
-			sn := &TreeNode{Name: row.Title, Session: row, Parent: dn, Depth: 1}
-			if row.SessionID != "" {
-				kids := children[row.SessionID]
-				for j := range kids {
-					c := &kids[j]
-					rel := "subagent"
-					if session.IsVersionOf(c, row) {
-						rel = "version"
-					}
-					sn.Children = append(sn.Children, &TreeNode{
-						Name: c.Title, Session: c, Parent: sn, Depth: 2, Rel: rel,
-					})
-				}
-			}
+		name := filepath.Base(dir)
+		if names[name] > 1 {
+			name = dir // same folder name in different workspaces
+		}
+		dn := &TreeNode{Name: name, Path: dir, IsDir: true, Expanded: autoExpand}
+		for _, row := range groups[dir] {
+			sn := buildSessionTree(row, children[row.SessionID], autoExpand)
+			sn.Parent = dn
 			dn.Children = append(dn.Children, sn)
 		}
 		tree = append(tree, dn)
 	}
 	return tree
+}
+
+func buildSessionTree(row session.Session, children []session.Session, autoExpand bool) *TreeNode {
+	root := &TreeNode{Name: row.Title, Session: &row, Depth: 1, Expanded: autoExpand}
+	if row.SessionID == "" {
+		return root
+	}
+	byID := map[string]*TreeNode{row.SessionID: root}
+	newest := map[string]*TreeNode{row.GroupID: root}
+	var nodes []*TreeNode
+	for _, child := range children {
+		c := child
+		for _, path := range c.Workspaces() {
+			if path == row.Cwd {
+				c.Cwd = path
+				break
+			}
+		}
+		rel := "subagent"
+		if session.IsVersionOf(&c, &row) {
+			rel = "version"
+		}
+		n := &TreeNode{Name: c.Title, Session: &c, Rel: rel, Expanded: autoExpand}
+		nodes = append(nodes, n)
+		byID[c.SessionID] = n
+		if c.GroupID != "" && newest[c.GroupID] == nil {
+			newest[c.GroupID] = n
+		}
+	}
+	for _, n := range nodes {
+		n.Parent = root
+		if representative := newest[n.Session.GroupID]; n.Session.GroupID != "" && representative != nil && representative != n {
+			n.Parent = representative
+			n.Rel = "version"
+		} else {
+			parentID := n.Session.ParentID
+			if n.Session.IsSubagent() {
+				parentID = n.Session.SubagentOwnerID()
+			}
+			if parent := byID[parentID]; parent != nil && parent != n {
+				n.Parent = parent
+			}
+		}
+	}
+	// Malformed parent cycles must not make sessions disappear or recurse forever.
+	for _, n := range nodes {
+		for p, depth := n.Parent, 0; p != root && p != nil; p, depth = p.Parent, depth+1 {
+			if p == n || depth > len(nodes) {
+				n.Parent = root
+				break
+			}
+		}
+	}
+	for _, n := range nodes {
+		n.Parent.Children = append(n.Parent.Children, n)
+	}
+	var setDepth func(*TreeNode)
+	setDepth = func(n *TreeNode) {
+		for _, c := range n.Children {
+			c.Depth = n.Depth + 1
+			setDepth(c)
+		}
+	}
+	setDepth(root)
+	return root
 }
 
 // FlattenTree returns visible nodes (respecting expanded/collapsed state).
@@ -140,11 +212,11 @@ func RenderTreeNode(node *TreeNode, width int, selected bool) string {
 	if node.IsDir {
 		count := formatCount(len(node.Children))
 		if selected {
-			return SelectedStyle.Width(width).Render(fit(fmt.Sprintf("%s%s %s (%s)", indent, icon, node.Name, count), width))
+			return SelectedStyle.Width(width).Render(fit(fmt.Sprintf("%s%s %s (%s)", indent, icon, terminaltext.Line(node.Name), count), width))
 		}
 		head := indent + icon + " 📁 "
 		tail := " " + count
-		name := fit(node.Name, width-ansi.StringWidth(head)-ansi.StringWidth(tail))
+		name := fit(terminaltext.Line(node.Name), width-ansi.StringWidth(head)-ansi.StringWidth(tail))
 		return fit(head+name+DimStyle.Render(tail), width)
 	}
 
@@ -162,7 +234,7 @@ func RenderTreeNode(node *TreeNode, width int, selected bool) string {
 			badge = " " + b
 		}
 	}
-	title := fit(node.Name, width-ansi.StringWidth(head)-ansi.StringWidth(badge))
+	title := fit(terminaltext.Line(node.Name), width-ansi.StringWidth(head)-ansi.StringWidth(badge))
 	if selected {
 		return SelectedStyle.Width(width).Render(fit(head+title+badge, width))
 	}

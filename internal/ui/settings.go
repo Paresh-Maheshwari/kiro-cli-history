@@ -10,7 +10,7 @@ import (
 )
 
 func RenderSettings(w, h, cursor int) string {
-	cfg := session.AppConfig
+	cfg := session.CurrentConfig()
 
 	// Dynamic width
 	bw := 54

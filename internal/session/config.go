@@ -2,8 +2,10 @@ package session
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
+	"sync"
 )
 
 // Config holds user preferences.
@@ -18,12 +20,28 @@ type Config struct {
 var DefaultConfig = Config{
 	SQLiteEnabled:   true,
 	SQLiteIndex:     false,
-	DefaultView:     "list",
+	DefaultView:     "tree",
 	HideSubagents:   true,
 	CollapseRewinds: true,
 }
 
-var AppConfig = DefaultConfig
+var (
+	configMu  sync.RWMutex
+	appConfig = DefaultConfig
+)
+
+// CurrentConfig returns a snapshot safe to pass to background work.
+func CurrentConfig() Config {
+	configMu.RLock()
+	defer configMu.RUnlock()
+	return appConfig
+}
+
+func SetConfig(cfg Config) {
+	configMu.Lock()
+	defer configMu.Unlock()
+	appConfig = cfg
+}
 
 func configPath() string {
 	home, _ := os.UserHomeDir()
@@ -35,32 +53,68 @@ func configPath() string {
 
 // LoadConfig reads config from ~/.config/kiro-cli-history/config.json.
 // Creates default config if not found.
-func LoadConfig() {
+func LoadConfig() error {
+	SetConfig(DefaultConfig)
 	path := configPath()
 	if path == "" {
-		return
+		return fmt.Errorf("cannot locate configuration directory")
 	}
 
 	data, err := os.ReadFile(path)
+	if os.IsNotExist(err) {
+		return SaveConfig(DefaultConfig)
+	}
 	if err != nil {
-		// Create default config
-		SaveConfig(DefaultConfig)
-		return
+		return err
 	}
 
-	if json.Unmarshal(data, &AppConfig) != nil {
-		AppConfig = DefaultConfig
+	cfg := DefaultConfig
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		return fmt.Errorf("read settings: %w", err)
 	}
+	if cfg.DefaultView != "tree" && cfg.DefaultView != "list" {
+		return fmt.Errorf("invalid default view %q", cfg.DefaultView)
+	}
+	SetConfig(cfg)
+	return nil
 }
 
 // SaveConfig writes config to disk.
-func SaveConfig(cfg Config) {
+func SaveConfig(cfg Config) error {
 	path := configPath()
 	if path == "" {
-		return
+		return fmt.Errorf("cannot locate configuration directory")
 	}
-	os.MkdirAll(filepath.Dir(path), 0755)
-	data, _ := json.MarshalIndent(cfg, "", "  ")
-	os.WriteFile(path, data, 0644)
-	AppConfig = cfg
+	if err := saveConfigFile(path, cfg); err != nil {
+		return err
+	}
+	SetConfig(cfg)
+	return nil
+}
+
+func saveConfigFile(path string, cfg Config) error {
+	data, err := json.MarshalIndent(cfg, "", "  ")
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+		return err
+	}
+	f, err := os.CreateTemp(filepath.Dir(path), ".config-*.json")
+	if err != nil {
+		return err
+	}
+	defer os.Remove(f.Name())
+	if _, err := f.Write(data); err != nil {
+		f.Close()
+		return err
+	}
+	if err := f.Sync(); err != nil {
+		f.Close()
+		return err
+	}
+	if err := f.Close(); err != nil {
+		return err
+	}
+	return os.Rename(f.Name(), path)
 }

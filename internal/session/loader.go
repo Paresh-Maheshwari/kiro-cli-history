@@ -2,15 +2,17 @@ package session
 
 import (
 	"encoding/json"
+	"errors"
 	"runtime"
 	"sort"
 	"strings"
 	"sync"
+	"time"
 )
 
 // LoadFilter narrows which sessions LoadAll returns.
 type LoadFilter struct {
-	Cwd string // if set, keep only sessions whose directory equals this path
+	Cwd string // if set, keep sessions with a workspace matching this path
 }
 
 // LoadAll loads all sessions, deduplicates, sorts newest first, links
@@ -23,23 +25,31 @@ func LoadAll() []Session {
 // full-text indexing, so a directory filter also makes startup much faster:
 // only the matching sessions' message files are read.
 func LoadAllFiltered(f LoadFilter) []Session {
-	out := LoadJSONL()
-
-	var sqlite []Session
-	if AppConfig.SQLiteEnabled {
-		sqlite = LoadSQLite()
+	// Prefer the V3 copy when a V2/SQLite conversation has been migrated.
+	candidates := append(LoadV3(), LoadJSONL()...)
+	if CurrentConfig().SQLiteEnabled {
+		candidates = append(candidates, LoadSQLite()...)
 	}
-
-	seen := make(map[string]bool, len(out))
-	for _, s := range out {
+	var out []Session
+	seen := make(map[string]bool, len(candidates))
+	aliases := make(map[string]string)
+	for _, s := range candidates {
+		old := legacyV3ID(s)
+		if s.SessionID != "" && (seen[s.SessionID] || old != "" && seen[old]) {
+			continue
+		}
+		out = append(out, s)
 		if s.SessionID != "" {
 			seen[s.SessionID] = true
 		}
+		if old != "" {
+			seen[old] = true
+			aliases[old] = s.SessionID
+		}
 	}
-	for _, s := range sqlite {
-		if s.SessionID != "" && !seen[s.SessionID] {
-			out = append(out, s)
-			seen[s.SessionID] = true
+	for i := range out {
+		if id, ok := aliases[out[i].ParentID]; ok {
+			out[i].ParentID = id
 		}
 	}
 
@@ -47,15 +57,20 @@ func LoadAllFiltered(f LoadFilter) []Session {
 		want := normPath(f.Cwd)
 		kept := out[:0]
 		for _, s := range out {
-			if normPath(s.Cwd) == want {
-				kept = append(kept, s)
+			for _, cwd := range s.Workspaces() {
+				if normPath(cwd) == want {
+					// Resume a multi-root conversation in the requested workspace.
+					s.Cwd = cwd
+					kept = append(kept, s)
+					break
+				}
 			}
 		}
 		out = kept
 	}
 
 	sort.SliceStable(out, func(i, j int) bool {
-		return sortKey(&out[i]) > sortKey(&out[j])
+		return sortKey(&out[i]).After(sortKey(&out[j]))
 	})
 	Link(out)
 	for i := range out {
@@ -67,38 +82,55 @@ func LoadAllFiltered(f LoadFilter) []Session {
 // normPath makes directory comparison tolerant of a trailing separator.
 func normPath(p string) string {
 	if len(p) > 1 {
-		p = strings.TrimRight(p, `/\`)
+		trimmed := strings.TrimRight(p, `/\`)
+		if trimmed == "" {
+			return p[:1] // filesystem root
+		}
+		if len(trimmed) == 2 && trimmed[1] == ':' && len(p) > 2 {
+			return p[:3] // keep C:\ absolute instead of turning it into C:
+		}
+		p = trimmed
 	}
 	return p
 }
 
-func sortKey(s *Session) string {
+func sortKey(s *Session) time.Time {
 	if s.UpdatedAt != "" {
-		return s.UpdatedAt
+		if t := parseTime(s.UpdatedAt); !t.IsZero() {
+			return t
+		}
 	}
-	return s.CreatedAt
+	return parseTime(s.CreatedAt)
 }
 
 func baseSearchText(s *Session) string {
-	return strings.ToLower(s.Title) + "\n" + strings.ToLower(s.Cwd) + "\n"
+	return strings.ToLower(s.Title) + "\n" + strings.ToLower(s.Cwd) + "\n" +
+		strings.ToLower(strings.Join(s.WorkspacePaths, "\n")) + "\n"
 }
 
 // IndexResult is the full-text data for one session. It is computed off the
 // UI goroutine and applied with ApplyIndex, so sessions are never mutated
 // concurrently.
 type IndexResult struct {
-	Done  bool
-	Text  string // lowercased message text, appended to SearchText
-	Count int    // visible messages (same rules as the preview)
-	Title string // replacement title; "" keeps the current one
+	Done    bool
+	Text    string // lowercased message text, appended to SearchText
+	Count   int    // visible messages (same rules as the preview)
+	Title   string // replacement title; "" keeps the current one
+	Limited bool   // full-text content was unreadable or exceeded the indexing budget
 }
 
 // BuildFullIndex reads message content for every session. It only reads
 // sessions; results[i] belongs to sessions[i].
 func BuildFullIndex(sessions []Session) []IndexResult {
-	res := make([]IndexResult, len(sessions))
+	return BuildFullIndexWithConfig(sessions, CurrentConfig())
+}
 
-	workers := runtime.NumCPU() - 1 // leave a core for the UI
+// BuildFullIndexWithConfig uses the settings captured when indexing was requested.
+func BuildFullIndexWithConfig(sessions []Session, cfg Config) []IndexResult {
+	res := make([]IndexResult, len(sessions))
+	budget := newIndexBudget(MaxIndexBytes)
+
+	workers := min(4, runtime.NumCPU()-1) // bound concurrent decoder memory
 	if workers < 1 {
 		workers = 1
 	}
@@ -109,8 +141,8 @@ func BuildFullIndex(sessions []Session) []IndexResult {
 		go func() {
 			defer wg.Done()
 			for i := range jobs {
-				text, count := indexJSONL(sessions[i].JSONLPath)
-				res[i] = IndexResult{Done: true, Text: text, Count: count}
+				text, count, limited := indexJSONLBounded(sessions[i].JSONLPath, budget)
+				res[i] = IndexResult{Done: true, Text: text, Count: count, Limited: limited}
 			}
 		}()
 	}
@@ -122,8 +154,8 @@ func BuildFullIndex(sessions []Session) []IndexResult {
 	close(jobs)
 	wg.Wait()
 
-	if AppConfig.SQLiteEnabled && AppConfig.SQLiteIndex {
-		indexSQLite(sessions, res)
+	if cfg.SQLiteEnabled && cfg.SQLiteIndex {
+		indexSQLite(sessions, res, budget)
 	}
 	return res
 }
@@ -148,46 +180,34 @@ func ApplyIndex(sessions []Session, res []IndexResult) {
 }
 
 // indexSQLite fills results for classic-mode sessions (full content scan).
-func indexSQLite(sessions []Session, res []IndexResult) {
+func indexSQLite(sessions []Session, res []IndexResult, budget *indexBudget) {
 	conn := openDB()
 	if conn == nil {
 		return
 	}
-	v2 := make(map[string]int)
-	v1 := make(map[string]int)
 	for i := range sessions {
-		switch sessions[i].Source {
-		case "sqlite_v2":
-			v2[sessions[i].SessionID] = i
-		case "sqlite_v1":
-			v1[sessions[i].Cwd] = i
+		s := sessions[i]
+		if s.Source != "sqlite_v1" && s.Source != "sqlite_v2" {
+			continue
 		}
-	}
-	scan := func(query string, idx map[string]int) {
-		if len(idx) == 0 {
-			return
-		}
-		rows, err := conn.Query(query)
+		value, err := sqliteValue(conn, s)
 		if err != nil {
-			return
+			res[i].Limited = errors.Is(err, errConversationTooLarge)
+			continue
 		}
-		defer rows.Close()
-		for rows.Next() {
-			var key, value string
-			if rows.Scan(&key, &value) != nil {
-				continue
-			}
-			if i, ok := idx[key]; ok {
-				res[i] = sqliteResult(value)
-			}
-		}
+		res[i] = sqliteResultWithBudget(value, budget)
 	}
-	scan("SELECT conversation_id, value FROM conversations_v2", v2)
-	scan("SELECT key, value FROM conversations", v1)
 }
 
 // sqliteResult parses one conversation blob into an IndexResult.
 func sqliteResult(value string) IndexResult {
+	return sqliteResultWithBudget(value, newIndexBudget(MaxIndexBytes))
+}
+
+func sqliteResultWithBudget(value string, budget *indexBudget) IndexResult {
+	if len(value) > MaxFileSize {
+		return IndexResult{Limited: true}
+	}
 	var d struct {
 		History []json.RawMessage `json:"history"`
 	}
@@ -200,13 +220,14 @@ func sqliteResult(value string) IndexResult {
 			r.Title = cleanTitle(t)
 		}
 	}
-	msgs := extractHistoryMsgs(d.History, 0)
-	var b strings.Builder
-	for _, m := range msgs {
-		b.WriteString(strings.ToLower(m.Text))
-		b.WriteByte('\n')
+	b := indexText{budget: budget}
+	for _, raw := range d.History {
+		for _, m := range extractHistoryMsgs([]json.RawMessage{raw}, 0) {
+			b.add(m.Text)
+			r.Count++
+		}
 	}
-	r.Text = b.String()
-	r.Count = len(msgs)
+	r.Text = b.text.String()
+	r.Limited = b.limited
 	return r
 }

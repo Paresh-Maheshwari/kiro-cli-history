@@ -3,17 +3,27 @@ package session
 import (
 	"database/sql"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"net/url"
 	"os"
 	"path/filepath"
+	"sync"
 	"time"
 
 	_ "github.com/mattn/go-sqlite3"
 )
 
-var sqliteDB *sql.DB
+var (
+	sqliteDB *sql.DB
+	sqliteMu sync.Mutex
+)
+
+var errConversationTooLarge = errors.New("conversation exceeds the 100 MiB file limit")
 
 func openDB() *sql.DB {
+	sqliteMu.Lock()
+	defer sqliteMu.Unlock()
 	if sqliteDB != nil {
 		return sqliteDB
 	}
@@ -49,6 +59,8 @@ func sqliteURI(path string) string {
 
 // CloseDB closes the shared SQLite connection.
 func CloseDB() {
+	sqliteMu.Lock()
+	defer sqliteMu.Unlock()
 	if sqliteDB != nil {
 		sqliteDB.Close()
 		sqliteDB = nil
@@ -88,8 +100,8 @@ func loadV2Meta(conn *sql.DB) []Session {
 			SessionID:   convID,
 			Title:       filepath.Base(cwd),
 			Cwd:         cwd,
-			CreatedAt:   time.UnixMilli(cMs).Format("2006-01-02T15:04:05"),
-			UpdatedAt:   time.UnixMilli(uMs).Format("2006-01-02T15:04:05"),
+			CreatedAt:   time.UnixMilli(cMs).UTC().Format(time.RFC3339Nano),
+			UpdatedAt:   time.UnixMilli(uMs).UTC().Format(time.RFC3339Nano),
 			Source:      "sqlite_v2",
 			DurationMin: int((uMs - cMs) / 1000 / 60),
 		})
@@ -128,36 +140,52 @@ func loadV1Meta(conn *sql.DB) []Session {
 
 // LoadSQLiteHistory loads the full history for a single session on-demand.
 func LoadSQLiteHistory(s Session) []json.RawMessage {
+	history, _ := loadSQLiteHistory(s)
+	return history
+}
+
+func loadSQLiteHistory(s Session) ([]json.RawMessage, error) {
 	conn := openDB()
 	if conn == nil {
-		return nil
+		return nil, errors.New("classic conversation storage is unavailable")
 	}
+	value, err := sqliteValue(conn, s)
+	if err != nil {
+		return nil, err
+	}
+	var d struct {
+		History []json.RawMessage `json:"history"`
+	}
+	if err := json.Unmarshal([]byte(value), &d); err != nil {
+		return nil, err
+	}
+	return d.History, nil
+}
 
-	var value string
+func sqliteValue(conn *sql.DB, s Session) (string, error) {
+	var value sql.NullString
 	var err error
 
 	switch s.Source {
 	case "sqlite_v2":
 		err = conn.QueryRow(
-			"SELECT value FROM conversations_v2 WHERE conversation_id = ?", s.SessionID,
+			"SELECT CASE WHEN length(CAST(value AS BLOB)) <= ? THEN value END FROM conversations_v2 WHERE conversation_id = ?",
+			MaxFileSize, s.SessionID,
 		).Scan(&value)
 	case "sqlite_v1":
 		err = conn.QueryRow(
-			"SELECT value FROM conversations WHERE key = ?", s.Cwd,
+			"SELECT CASE WHEN length(CAST(value AS BLOB)) <= ? THEN value END FROM conversations WHERE key = ?",
+			MaxFileSize, s.Cwd,
 		).Scan(&value)
 	default:
-		return nil
+		return "", fmt.Errorf("unknown classic source %q", s.Source)
 	}
 
 	if err != nil {
-		return nil
+		return "", err
 	}
-
-	var d struct {
-		History []json.RawMessage `json:"history"`
+	if !value.Valid {
+		return "", errConversationTooLarge
 	}
-	if json.Unmarshal([]byte(value), &d) != nil {
-		return nil
-	}
-	return d.History
+	return value.String, nil
 }

@@ -3,16 +3,21 @@ package session
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
 	"strings"
 )
 
-// maxLineSize bounds a single .jsonl line (tool results can be several MB).
+// maxLineSize bounds one decoded record, not the conversation file. Known
+// non-message records are discarded while streaming, regardless of their size.
 const maxLineSize = 64 * 1024 * 1024
+
+var errJSONLRecordTooLarge = errors.New("one or more JSONL records exceed the 64 MiB decoding limit")
 
 // jsonlMeta holds the fields we need from <id>.json.
 type jsonlMeta struct {
@@ -26,8 +31,9 @@ type jsonlMeta struct {
 }
 
 type jsonlLine struct {
-	Kind string          `json:"kind"`
-	Data json.RawMessage `json:"data"`
+	Kind    string          `json:"kind"`
+	Data    json.RawMessage `json:"data"`
+	Payload json.RawMessage `json:"payload"` // V3 message envelope
 }
 
 // jsonlBlock is one content block. Data is a string for "text" blocks and an
@@ -62,7 +68,7 @@ func readMeta(path string) (jsonlMeta, error) {
 	if _, serr := f.Seek(0, io.SeekStart); serr != nil {
 		return m, err
 	}
-	return decodeMeta(f)
+	return decodeMeta(io.LimitReader(f, MaxFileSize))
 }
 
 func decodeMeta(r io.Reader) (jsonlMeta, error) {
@@ -199,6 +205,9 @@ func decodeMsg(line []byte) (Msg, bool) {
 	if json.Unmarshal(line, &l) != nil {
 		return Msg{}, false
 	}
+	if l.Kind == "" && len(l.Payload) > 0 {
+		return decodeV3Msg(l.Payload)
+	}
 	var role string
 	switch l.Kind {
 	case "Prompt":
@@ -236,33 +245,76 @@ func decodeMsg(line []byte) (Msg, bool) {
 // scanJSONL calls fn for every visible message in the file, in order.
 // Malformed or partially written lines are skipped. fn returns false to stop.
 func scanJSONL(path string, fn func(Msg) bool) error {
+	return scanJSONLWithCancel(path, fn, nil)
+}
+
+func scanJSONLWithCancel(path string, fn func(Msg) bool, abort func() bool) error {
 	f, err := os.Open(path)
 	if err != nil {
 		return err
 	}
 	defer f.Close()
-
-	sc := bufio.NewScanner(f)
-	sc.Buffer(make([]byte, 0, 256*1024), maxLineSize)
-	for sc.Scan() {
-		if m, ok := decodeMsg(sc.Bytes()); ok {
-			if !fn(m) {
-				return nil
+	info, err := f.Stat()
+	if err != nil {
+		return err
+	}
+	if !info.Mode().IsRegular() {
+		return fmt.Errorf("conversation is not a regular file")
+	}
+	// Read a snapshot of the current length. An actively growing conversation
+	// must not keep an index/export operation running indefinitely.
+	reader := bufio.NewReaderSize(io.NewSectionReader(f, 0, info.Size()), 64*1024)
+	var record []byte
+	var recordErr error
+	discard := false
+	for {
+		if abort != nil && abort() {
+			return context.Canceled
+		}
+		fragment, readErr := reader.ReadSlice('\n')
+		if !discard && len(record) == 0 {
+			if kind := peekKind(fragment); kind != "" && kind != "Prompt" && kind != "AssistantMessage" {
+				discard = true
 			}
 		}
+		if !discard {
+			if len(record)+len(fragment) > maxLineSize {
+				recordErr = errJSONLRecordTooLarge
+				discard = true
+				record = nil
+			} else if readErr == bufio.ErrBufferFull || len(record) > 0 {
+				record = append(record, fragment...)
+			}
+		}
+		if readErr != bufio.ErrBufferFull {
+			if !discard {
+				line := fragment
+				if len(record) > 0 {
+					line = record
+				}
+				if m, ok := decodeMsg(line); ok && !fn(m) {
+					return recordErr
+				}
+			}
+			discard = false
+			// Do not retain a very large record buffer for the rest of a file.
+			if cap(record) > 1024*1024 {
+				record = nil
+			} else {
+				record = record[:0]
+			}
+		}
+		if readErr == io.EOF {
+			return recordErr
+		}
+		if readErr != nil && readErr != bufio.ErrBufferFull {
+			return errors.Join(recordErr, readErr)
+		}
 	}
-	return sc.Err()
 }
 
 // extractJSONLMessages reads up to limit messages (0 = all) from a .jsonl file.
 func extractJSONLMessages(path string, limit int) []Msg {
-	info, err := os.Stat(path)
-	if err != nil || info.Size() == 0 {
-		return nil
-	}
-	if info.Size() > MaxFileSize {
-		return []Msg{{Role: "system", Text: "(File too large to preview)"}}
-	}
 	var msgs []Msg
 	scanJSONL(path, func(m Msg) bool {
 		msgs = append(msgs, m)
@@ -274,18 +326,18 @@ func extractJSONLMessages(path string, limit int) []Msg {
 // indexJSONL returns the lowercased searchable text and the message count,
 // using exactly the same rules as the preview.
 func indexJSONL(path string) (text string, count int) {
-	info, err := os.Stat(path)
-	if err != nil || info.Size() == 0 || info.Size() > MaxFileSize {
-		return "", 0
-	}
-	var b strings.Builder
-	scanJSONL(path, func(m Msg) bool {
-		b.WriteString(strings.ToLower(m.Text))
-		b.WriteByte('\n')
+	text, count, _ = indexJSONLBounded(path, newIndexBudget(MaxIndexBytes))
+	return text, count
+}
+
+func indexJSONLBounded(path string, budget *indexBudget) (text string, count int, limited bool) {
+	b := indexText{budget: budget}
+	err := scanJSONL(path, func(m Msg) bool {
+		b.add(m.Text)
 		count++
 		return true
 	})
-	return b.String(), count
+	return b.text.String(), count, b.limited || err != nil
 }
 
 // firstPromptJSONL returns the first line of the first user prompt.

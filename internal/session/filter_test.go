@@ -28,8 +28,11 @@ func setupSessions(t *testing.T) string {
 
 func TestLoadAllFilteredByCwd(t *testing.T) {
 	setupSessions(t)
-	AppConfig = DefaultConfig
-	AppConfig.SQLiteEnabled = false
+	before := CurrentConfig()
+	t.Cleanup(func() { SetConfig(before) })
+	cfg := DefaultConfig
+	cfg.SQLiteEnabled = false
+	SetConfig(cfg)
 
 	all := LoadAllFiltered(LoadFilter{})
 	if len(all) != 3 {
@@ -52,5 +55,25 @@ func TestLoadAllFilteredByCwd(t *testing.T) {
 
 	if n := len(LoadAllFiltered(LoadFilter{Cwd: "/nowhere"})); n != 0 {
 		t.Fatalf("non-matching filter = %d, want 0", n)
+	}
+}
+
+func TestWorkspaces(t *testing.T) {
+	s := Session{
+		Cwd:            "/a/project/",
+		WorkspacePaths: []string{"", "/a/project", "/b/project", "/b/project/"},
+	}
+	got := s.Workspaces()
+	if len(got) != 2 || got[0] != "/a/project" || got[1] != "/b/project" {
+		t.Fatalf("unexpected workspaces: %v", got)
+	}
+	if paths := (&Session{}).Workspaces(); len(paths) != 0 {
+		t.Fatalf("empty session has workspaces: %v", paths)
+	}
+	for _, root := range []string{"/", `C:\`, "C:/"} {
+		paths := (&Session{Cwd: root}).Workspaces()
+		if len(paths) != 1 || paths[0] != root {
+			t.Errorf("workspace root %q became %v", root, paths)
+		}
 	}
 }

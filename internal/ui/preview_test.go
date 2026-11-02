@@ -24,9 +24,9 @@ func writeSession(t *testing.T, dir, id string, n int) session.Session {
 }
 
 func TestLazyPreview(t *testing.T) {
-	session.AppConfig = session.DefaultConfig
+	session.SetConfig(session.DefaultConfig)
 	dir := t.TempDir()
-	big := writeSession(t, dir, "big", previewFirst+20)
+	big := writeSession(t, dir, "big", 50)
 	small := writeSession(t, dir, "small", 3)
 
 	m := NewModel()
@@ -36,7 +36,7 @@ func TestLazyPreview(t *testing.T) {
 	m.ViewMode = ViewList
 	m.refilter(true)
 
-	// Big session: partial content now, full render pending.
+	// Selection only schedules work; it never reads/renders on the UI thread.
 	if m.pendingKey == "" || !m.pendingNew {
 		t.Fatal("expected a pending full render")
 	}
@@ -60,8 +60,8 @@ func TestLazyPreview(t *testing.T) {
 	if c := m.startFullRender(partialGen); c != nil {
 		t.Fatal("stale render should not start")
 	}
-	if m.pendingKey != "" {
-		t.Fatal("small session should render completely without pending work")
+	if m.pendingKey == "" {
+		t.Fatal("small session should also render in the background")
 	}
 
 	// Back to the big one: run the full render and apply it.
@@ -80,7 +80,7 @@ func TestLazyPreview(t *testing.T) {
 		t.Fatal("pending not cleared after full render")
 	}
 	full, _ := RenderPreviewN(big, m.RightW(), 0, nil)
-	if !strings.Contains(full, fmt.Sprintf("question %d", previewFirst+20)) {
+	if !strings.Contains(full, "question 50") {
 		t.Fatal("full render missing last message")
 	}
 	if strings.Contains(full, "loading the remaining") {
@@ -106,5 +106,20 @@ func TestRenderPreviewNPartial(t *testing.T) {
 	}
 	if out, complete := RenderPreviewN(s, 80, 0, func() bool { return true }); complete || out != "" {
 		t.Fatal("abort ignored")
+	}
+}
+
+func BenchmarkLargeAssistantPreview(b *testing.B) {
+	dir := b.TempDir()
+	text := strings.Repeat("**bold** and `code`\n", 6000)
+	raw := fmt.Sprintf(`{"payload":{"type":"assistant","content":%q}}`+"\n", text)
+	path := filepath.Join(dir, "messages.jsonl")
+	if err := os.WriteFile(path, []byte(raw), 0600); err != nil {
+		b.Fatal(err)
+	}
+	s := session.Session{SessionID: "large", Source: "jsonl_v3", JSONLPath: path}
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		RenderPreviewN(s, 90, 0, nil)
 	}
 }

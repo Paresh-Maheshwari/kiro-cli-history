@@ -33,6 +33,13 @@ jobs:
           fi
           echo "version=$src" >> "$GITHUB_OUTPUT"
 
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+
+      - name: Check dependency vulnerabilities
+        run: go run golang.org/x/vuln/cmd/govulncheck@v1.9.0 ./...
+
   build:
     name: Build ${{ matrix.goos }}/${{ matrix.goarch }}
     needs: check
@@ -83,6 +90,34 @@ jobs:
           echo "$out"
           [ "$out" = "kiro-cli-history ${VERSION}" ] || { echo "::error::unexpected version output"; exit 1; }
           "./$ASSET" --help > /dev/null
+
+      - name: Prepare installer verification
+        run: sha256sum "$ASSET" > checksums.txt
+
+      - name: Verify Unix installer before publication
+        if: runner.os != 'Windows'
+        env:
+          KIRO_CLI_HISTORY_RELEASE_DIR: ${{ github.workspace }}
+          KIRO_CLI_HISTORY_VERSION: ${{ env.VERSION }}
+          INSTALL_DIR: ${{ runner.temp }}/kiro-install-test
+        run: |
+          bash get.sh
+          "$INSTALL_DIR/kiro-cli-history" --version | grep -qx "kiro-cli-history ${VERSION}"
+
+      - name: Verify Windows installers before publication
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          KIRO_CLI_HISTORY_RELEASE_DIR: ${{ github.workspace }}
+          KIRO_CLI_HISTORY_VERSION: ${{ env.VERSION }}
+          KIRO_CLI_HISTORY_INSTALL_DIR: ${{ runner.temp }}\kiro-install-test
+        run: |
+          ./install.ps1
+          $v = & "$env:KIRO_CLI_HISTORY_INSTALL_DIR\kiro-cli-history.exe" --version | Select-Object -First 1
+          if ($v -ne "kiro-cli-history $env:VERSION") { throw "Unexpected version: $v" }
+          cmd /c "install.cmd /nopause"
+          if ($LASTEXITCODE -ne 0) { throw 'install.cmd failed' }
+          ./scripts/test-install.ps1 -ReleaseDir $env:KIRO_CLI_HISTORY_RELEASE_DIR -Version $env:VERSION
 
       - uses: actions/upload-artifact@v7
         with:

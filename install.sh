@@ -35,18 +35,23 @@ else
 fi
 
 echo "Building..."
-TMP_BIN=$(mktemp "${TMPDIR:-/tmp}/${BIN_NAME}.XXXXXX")
+mkdir -p "$INSTALL_DIR"
+TMP_BIN=$(mktemp "${INSTALL_DIR}/.${BIN_NAME}.XXXXXX")
 trap 'rm -f "$TMP_BIN"' EXIT
 go build -trimpath -ldflags="-s -w" -o "$TMP_BIN" .
 
-mkdir -p "$INSTALL_DIR"
 chmod +x "$TMP_BIN"
+output=$("$TMP_BIN" --version)
+case "$output" in
+    "kiro-cli-history "*) ;;
+    *) echo "ERROR: built binary failed its version check"; exit 1 ;;
+esac
 mv -f "$TMP_BIN" "$INSTALL_DIR/$BIN_NAME"
 trap - EXIT
 
 echo ""
 echo "Installed to $INSTALL_DIR/$BIN_NAME"
-"$INSTALL_DIR/$BIN_NAME" --version | head -1
+printf '%s\n' "${output%%$'\n'*}"
 
 if [[ ":$PATH:" != *":$INSTALL_DIR:"* ]]; then
     case "$(basename "${SHELL:-bash}")" in

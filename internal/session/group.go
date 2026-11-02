@@ -17,8 +17,16 @@ func Link(all []Session) {
 	for i := range all {
 		s := &all[i]
 		s.GroupID = rewindRoot(all, byID, i)
-		if s.ParentID != "" {
-			if p, ok := byID[s.ParentID]; ok {
+		s.OwnerID = ""
+		if root, ok := byID[s.GroupID]; ok && all[root].CreatedReason == "subagent" {
+			s.OwnerID = all[root].ParentID
+		}
+		parent := s.ParentID
+		if s.OwnerID != "" {
+			parent = s.OwnerID
+		}
+		if parent != "" {
+			if p, ok := byID[parent]; ok {
 				s.ParentTitle = all[p].Title
 			}
 		}
@@ -76,7 +84,7 @@ func Collapse(cands []Session, collapseRewinds, hideSubagents bool) ([]Session, 
 		}
 		s := &cands[i]
 		if hideSubagents && s.IsSubagent() {
-			if p, ok := byID[s.ParentID]; ok && p != i {
+			if p, ok := byID[s.SubagentOwnerID()]; ok && p != i {
 				return ownerOf(p, depth+1)
 			}
 		}

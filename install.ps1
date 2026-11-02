@@ -28,43 +28,70 @@
     [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
 
     $asset = "$Bin-windows-$arch.exe"
-    $base = "https://github.com/$Repo/releases/latest/download"
+    $version = $env:KIRO_CLI_HISTORY_VERSION
+    $releaseDir = $env:KIRO_CLI_HISTORY_RELEASE_DIR
+    if (-not $version -and $releaseDir) { throw 'Staged installation requires KIRO_CLI_HISTORY_VERSION' }
+    if (-not $version) {
+        $release = Invoke-RestMethod -Uri "https://api.github.com/repos/$Repo/releases/latest"
+        $version = $release.tag_name
+    }
+    if ($version -notmatch '^v?\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$') { throw 'Invalid release version' }
+    $version = $version -replace '^v', ''
+    $base = "https://github.com/$Repo/releases/download/v$version"
     Write-Host "Detected: windows/$arch"
 
     $tmp = Join-Path ([IO.Path]::GetTempPath()) ([IO.Path]::GetRandomFileName())
+    $staged = $null
     New-Item -ItemType Directory -Path $tmp | Out-Null
     try {
         $exeTmp = Join-Path $tmp $asset
         Write-Host "Downloading $asset..."
-        try {
+        $sumsTmp = Join-Path $tmp 'checksums.txt'
+        if ($releaseDir) {
+            Copy-Item (Join-Path $releaseDir $asset) $exeTmp
+            Copy-Item (Join-Path $releaseDir 'checksums.txt') $sumsTmp
+        } else {
             Invoke-WebRequest -UseBasicParsing -Uri "$base/$asset" -OutFile $exeTmp
-        } catch {
-            throw "No release found for $asset. See https://github.com/$Repo/releases"
+            Invoke-WebRequest -UseBasicParsing -Uri "$base/checksums.txt" -OutFile $sumsTmp
         }
 
-        $sumsTmp = Join-Path $tmp 'checksums.txt'
-        Invoke-WebRequest -UseBasicParsing -Uri "$base/checksums.txt" -OutFile $sumsTmp
-        $want = $null
+        $matchesFound = @()
         foreach ($line in Get-Content $sumsTmp) {
             $f = $line -split '\s+'
-            if ($f.Count -ge 2 -and $f[1].TrimStart('*') -eq $asset) { $want = $f[0].ToLower() }
+            if ($f.Count -ge 2 -and $f[1].TrimStart('*') -eq $asset) { $matchesFound += $f[0].ToLower() }
         }
         $got = (Get-FileHash -Algorithm SHA256 -Path $exeTmp).Hash.ToLower()
-        if (-not $want -or $want -ne $got) { throw "Checksum verification failed for $asset" }
+        if ($matchesFound.Count -ne 1 -or $matchesFound[0] -ne $got) { throw "Checksum verification failed for $asset" }
         Write-Host 'Checksum verified.'
 
         New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
         $target = Join-Path $InstallDir "$Bin.exe"
+        $staged = Join-Path $InstallDir ".$Bin-$([Guid]::NewGuid()).exe"
+        Copy-Item $exeTmp $staged
+        $reported = @(& $staged --version)
+        if ($LASTEXITCODE -ne 0 -or $reported.Count -eq 0 -or $reported[0] -ne "$Bin $version") {
+            throw 'Downloaded binary reported an unexpected version'
+        }
+        $old = "$target.old"
+        $backedUp = $false
         if (Test-Path $target) {
             # A running exe can't be overwritten but can be renamed; the app
             # removes the .old file on its next start.
-            $old = "$target.old"
-            Remove-Item $old -Force -ErrorAction SilentlyContinue
+            if (Test-Path $old) { Remove-Item $old -Force }
             Move-Item $target $old -Force
+            $backedUp = $true
         }
-        Move-Item $exeTmp $target -Force
+        try {
+            Move-Item $staged $target -Force
+            $staged = $null
+        } catch {
+            $installError = $_
+            if ($backedUp) { Move-Item $old $target -Force }
+            throw $installError
+        }
         Write-Host "Installed to $target"
     } finally {
+        if ($staged -and (Test-Path $staged)) { Remove-Item $staged -Force -ErrorAction SilentlyContinue }
         Remove-Item $tmp -Recurse -Force -ErrorAction SilentlyContinue
     }
 

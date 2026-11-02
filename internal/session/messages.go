@@ -1,6 +1,7 @@
 package session
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -9,12 +10,46 @@ import (
 
 // ExtractMessages returns messages from any session format.
 func ExtractMessages(s Session, limit int) []Msg {
+	var msgs []Msg
+	err := WalkMessages(s, func(m Msg) bool {
+		msgs = append(msgs, m)
+		return limit <= 0 || len(msgs) < limit
+	})
+	if err != nil && len(msgs) == 0 {
+		return []Msg{{Role: "system", Text: err.Error()}}
+	}
+	return msgs
+}
+
+// WalkMessages streams visible messages in order. Returning false stops early.
+// Original text is preserved for copy/export; display sanitization is separate.
+func WalkMessages(s Session, visit func(Msg) bool) error {
+	return WalkMessagesWithCancel(s, visit, nil)
+}
+
+// WalkMessagesWithCancel also checks abort between input chunks, including
+// hidden tool traffic. Cancellation returns context.Canceled.
+func WalkMessagesWithCancel(s Session, visit func(Msg) bool, abort func() bool) error {
+	if abort != nil && abort() {
+		return context.Canceled
+	}
 	if s.JSONLPath != "" {
-		return extractJSONLMessages(s.JSONLPath, limit)
+		return scanJSONLWithCancel(s.JSONLPath, visit, abort)
 	}
 	if s.Source == "sqlite_v1" || s.Source == "sqlite_v2" {
-		if h := LoadSQLiteHistory(s); len(h) > 0 {
-			return extractHistoryMsgs(h, limit)
+		history, err := loadSQLiteHistory(s)
+		if err != nil {
+			return err
+		}
+		for _, raw := range history {
+			if abort != nil && abort() {
+				return context.Canceled
+			}
+			for _, m := range extractHistoryMsgs([]json.RawMessage{raw}, 0) {
+				if !visit(m) {
+					return nil
+				}
+			}
 		}
 	}
 	return nil
